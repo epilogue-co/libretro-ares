@@ -1570,6 +1570,24 @@ auto RSP::Recompiler::emitVU(u32 instruction) -> void {
 
   //VAND Vd,Vs,Vt(e)
   case 0x28: {
+    // Inline SSE bitwise-AND when no element shuffle is needed (e <= 1).
+    // ares interpreter semantics (interpreter-vpu.cpp:587-592):
+    //   ACCL = vs & vt(e);   vd = ACCL;
+    if(E <= 1) {
+      static constexpr sljit_s32 kSimdType =
+        SLJIT_SIMD_REG_128 | SLJIT_SIMD_ELEM_8 | SLJIT_SIMD_MEM_UNALIGNED;
+      static constexpr sljit_s32 kSimdReg = SLJIT_FR(6);
+      sljit_emit_simd_mov(compiler, SLJIT_SIMD_LOAD | kSimdType, kSimdReg,
+        SLJIT_MEM1(SLJIT_S(2)), offsetof(VU, r[0]) + Vsn * sizeof(r128));
+      sljit_emit_simd_op2(compiler, SLJIT_SIMD_OP2_AND | kSimdType,
+        kSimdReg, kSimdReg,
+        SLJIT_MEM1(SLJIT_S(2)), offsetof(VU, r[0]) + Vtn * sizeof(r128));
+      sljit_emit_simd_mov(compiler, SLJIT_SIMD_STORE | kSimdType, kSimdReg,
+        SLJIT_MEM1(SLJIT_S(2)), offsetof(VU, accl));
+      sljit_emit_simd_mov(compiler, SLJIT_SIMD_STORE | kSimdType, kSimdReg,
+        SLJIT_MEM1(SLJIT_S(2)), offsetof(VU, r[0]) + Vdn * sizeof(r128));
+      return;
+    }
     callvu(&RSP::VAND, mem(Vd), mem(Vs), mem(Vt));
     return;
   }
@@ -1582,6 +1600,21 @@ auto RSP::Recompiler::emitVU(u32 instruction) -> void {
 
   //VOR Vd,Vs,Vt(e)
   case 0x2a: {
+    if(E <= 1) {
+      static constexpr sljit_s32 kSimdType =
+        SLJIT_SIMD_REG_128 | SLJIT_SIMD_ELEM_8 | SLJIT_SIMD_MEM_UNALIGNED;
+      static constexpr sljit_s32 kSimdReg = SLJIT_FR(6);
+      sljit_emit_simd_mov(compiler, SLJIT_SIMD_LOAD | kSimdType, kSimdReg,
+        SLJIT_MEM1(SLJIT_S(2)), offsetof(VU, r[0]) + Vsn * sizeof(r128));
+      sljit_emit_simd_op2(compiler, SLJIT_SIMD_OP2_OR | kSimdType,
+        kSimdReg, kSimdReg,
+        SLJIT_MEM1(SLJIT_S(2)), offsetof(VU, r[0]) + Vtn * sizeof(r128));
+      sljit_emit_simd_mov(compiler, SLJIT_SIMD_STORE | kSimdType, kSimdReg,
+        SLJIT_MEM1(SLJIT_S(2)), offsetof(VU, accl));
+      sljit_emit_simd_mov(compiler, SLJIT_SIMD_STORE | kSimdType, kSimdReg,
+        SLJIT_MEM1(SLJIT_S(2)), offsetof(VU, r[0]) + Vdn * sizeof(r128));
+      return;
+    }
     callvu(&RSP::VOR, mem(Vd), mem(Vs), mem(Vt));
     return;
   }
@@ -1594,6 +1627,21 @@ auto RSP::Recompiler::emitVU(u32 instruction) -> void {
 
   //VXOR Vd,Vs,Vt(e)
   case 0x2c: {
+    if(E <= 1) {
+      static constexpr sljit_s32 kSimdType =
+        SLJIT_SIMD_REG_128 | SLJIT_SIMD_ELEM_8 | SLJIT_SIMD_MEM_UNALIGNED;
+      static constexpr sljit_s32 kSimdReg = SLJIT_FR(6);
+      sljit_emit_simd_mov(compiler, SLJIT_SIMD_LOAD | kSimdType, kSimdReg,
+        SLJIT_MEM1(SLJIT_S(2)), offsetof(VU, r[0]) + Vsn * sizeof(r128));
+      sljit_emit_simd_op2(compiler, SLJIT_SIMD_OP2_XOR | kSimdType,
+        kSimdReg, kSimdReg,
+        SLJIT_MEM1(SLJIT_S(2)), offsetof(VU, r[0]) + Vtn * sizeof(r128));
+      sljit_emit_simd_mov(compiler, SLJIT_SIMD_STORE | kSimdType, kSimdReg,
+        SLJIT_MEM1(SLJIT_S(2)), offsetof(VU, accl));
+      sljit_emit_simd_mov(compiler, SLJIT_SIMD_STORE | kSimdType, kSimdReg,
+        SLJIT_MEM1(SLJIT_S(2)), offsetof(VU, r[0]) + Vdn * sizeof(r128));
+      return;
+    }
     callvu(&RSP::VXOR, mem(Vd), mem(Vs), mem(Vt));
     return;
   }

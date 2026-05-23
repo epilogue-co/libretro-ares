@@ -41,6 +41,7 @@ struct Vulkan::Implementation {
   std::condition_variable condition;
   u32 scanoutCount = 0;
   u32 endCount = 0;
+  uint64_t pendingTimeline = 0;
 };
 
 auto Vulkan::load(Node::Object) -> bool {
@@ -126,7 +127,15 @@ auto Vulkan::render() -> bool {
     }
 
     if(::RDP::Op(code) == ::RDP::Op::SyncFull) {
-      implementation->processor->wait_for_timeline(implementation->processor->signal_timeline());
+      //defer the wait: drain the previously-issued SyncFull before signalling a new one.
+      //this pipelines GPU work one SyncFull behind the CPU so paraLLEl-RDP can render
+      //the current frame in parallel with the next frame's CPU work. The wait still
+      //happens (so DPI interrupt ordering is preserved relative to GPU completion),
+      //just one frame later. Scanout enforces its own fence on the readback buffer.
+      if(implementation->pendingTimeline) {
+        implementation->processor->wait_for_timeline(implementation->pendingTimeline);
+      }
+      implementation->pendingTimeline = implementation->processor->signal_timeline();
       rdp.syncFull();
     }
 
@@ -157,6 +166,13 @@ auto Vulkan::scanoutAsync(bool field) -> bool {
     implementation->condition.wait(lock, [this]() {
       return implementation->scanoutCount == implementation->endCount;
     });
+  }
+
+  //drain any deferred SyncFull before issuing scanout so the framebuffer reflects
+  //the most recently completed RDP frame, not one still rendering.
+  if(implementation->pendingTimeline) {
+    implementation->processor->wait_for_timeline(implementation->pendingTimeline);
+    implementation->pendingTimeline = 0;
   }
 
   implementation->processor->set_vi_register(::RDP::VIRegister::VCurrentLine, field);
@@ -226,6 +242,10 @@ Vulkan::Implementation::Implementation(u8* data, u32 size) {
   device.set_context(context);
   device.init_frame_contexts(3);
 
+  if(!vulkan.pipelineCache.empty()) {
+    device.init_pipeline_cache(vulkan.pipelineCache.data(), vulkan.pipelineCache.size());
+  }
+
   ::RDP::CommandProcessorFlags flags = 0;
   switch(vulkan.internalUpscale) {
   case 2: flags |= ::RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_2X_BIT; break;
@@ -252,6 +272,13 @@ Vulkan::Implementation::Implementation(u8* data, u32 size) {
 }
 
 Vulkan::Implementation::~Implementation() {
+  size_t cacheSize = device.get_pipeline_cache_size();
+  if(cacheSize > 0) {
+    vulkan.pipelineCache.resize(cacheSize);
+    if(!device.get_pipeline_cache_data(vulkan.pipelineCache.data(), cacheSize)) {
+      vulkan.pipelineCache.clear();
+    }
+  }
   if(processor) delete processor;
 }
 

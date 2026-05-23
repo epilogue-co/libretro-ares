@@ -5,18 +5,23 @@ inline auto Bus::read(u32 address, Thread& thread, RBusDevice device) -> u64 {
   if(address <= 0x03ef'ffff) return rdram.ram.read<Size>(address, device);
   if(address <= 0x03ff'ffff) return rdram.read<Size>(address, thread);
   if(Size == Dual)           return freezeDualRead(address), 0;
-  if(address <= 0x0407'ffff) return rsp.read<Size>(address, thread);
-  if(address <= 0x040b'ffff) return rsp.status.read<Size>(address, thread);
-  if(address <= 0x040f'ffff) return freezeUnmapped(address), 0;
-  if(address <= 0x041f'ffff) return rdp.read<Size>(address, thread);
-  if(address <= 0x042f'ffff) return rdp.io.read<Size>(address, thread);
-  if(address <= 0x043f'ffff) return mi.read<Size>(address, thread);
-  if(address <= 0x044f'ffff) return vi.read<Size>(address, thread);
-  if(address <= 0x045f'ffff) return ai.read<Size>(address, thread);
-  if(address <= 0x046f'ffff) return pi.read<Size>(address, thread);
-  if(address <= 0x047f'ffff) return ri.read<Size>(address, thread);
-  if(address <= 0x048f'ffff) return si.read<Size>(address, thread);
-  if(address <= 0x04ff'ffff) return freezeUnmapped(address), 0;
+  if(address <= 0x04ff'ffff) {
+    switch((address >> 20) & 0xf) {
+    case 0x0:
+      if(address <= 0x0407'ffff) return rsp.read<Size>(address, thread);
+      if(address <= 0x040b'ffff) return rsp.status.read<Size>(address, thread);
+      return freezeUnmapped(address), 0;
+    case 0x1: return rdp.read<Size>(address, thread);
+    case 0x2: return rdp.io.read<Size>(address, thread);
+    case 0x3: return mi.read<Size>(address, thread);
+    case 0x4: return vi.read<Size>(address, thread);
+    case 0x5: return ai.read<Size>(address, thread);
+    case 0x6: return pi.read<Size>(address, thread);
+    case 0x7: return ri.read<Size>(address, thread);
+    case 0x8: return si.read<Size>(address, thread);
+    default:  return freezeUnmapped(address), 0;
+    }
+  }
   if(address <= 0x1fbf'ffff) return pi.read<Size>(address, thread);
   if(address <= 0x1fcf'ffff) return si.read<Size>(address, thread);
   if(address <= 0x7fff'ffff) return pi.read<Size>(address, thread);
@@ -64,18 +69,23 @@ inline auto Bus::write(u32 address, u64 data, Thread& thread, RBusDevice device)
 
   if(address <= 0x03ef'ffff) return rdram.ram.write<Size>(address, data, device);
   if(address <= 0x03ff'ffff) return rdram.write<Size>(address, data, thread);
-  if(address <= 0x0407'ffff) return rsp.write<Size>(address, data, thread);
-  if(address <= 0x040b'ffff) return rsp.status.write<Size>(address, data, thread);
-  if(address <= 0x040f'ffff) return freezeUnmapped(address);
-  if(address <= 0x041f'ffff) return rdp.write<Size>(address, data, thread);
-  if(address <= 0x042f'ffff) return rdp.io.write<Size>(address, data, thread);
-  if(address <= 0x043f'ffff) return mi.write<Size>(address, data, thread);
-  if(address <= 0x044f'ffff) return vi.write<Size>(address, data, thread);
-  if(address <= 0x045f'ffff) return ai.write<Size>(address, data, thread);
-  if(address <= 0x046f'ffff) return pi.write<Size>(address, data, thread);
-  if(address <= 0x047f'ffff) return ri.write<Size>(address, data, thread);
-  if(address <= 0x048f'ffff) return si.write<Size>(address, data, thread);
-  if(address <= 0x04ff'ffff) return freezeUnmapped(address);
+  if(address <= 0x04ff'ffff) {
+    switch((address >> 20) & 0xf) {
+    case 0x0:
+      if(address <= 0x0407'ffff) return rsp.write<Size>(address, data, thread);
+      if(address <= 0x040b'ffff) return rsp.status.write<Size>(address, data, thread);
+      return freezeUnmapped(address);
+    case 0x1: return rdp.write<Size>(address, data, thread);
+    case 0x2: return rdp.io.write<Size>(address, data, thread);
+    case 0x3: return mi.write<Size>(address, data, thread);
+    case 0x4: return vi.write<Size>(address, data, thread);
+    case 0x5: return ai.write<Size>(address, data, thread);
+    case 0x6: return pi.write<Size>(address, data, thread);
+    case 0x7: return ri.write<Size>(address, data, thread);
+    case 0x8: return si.write<Size>(address, data, thread);
+    default:  return freezeUnmapped(address);
+    }
+  }
   if(address <= 0x1fbf'ffff) return pi.write<Size>(address, data, thread);
   if(address <= 0x1fcf'ffff) return si.write<Size>(address, data, thread);
   if(address <= 0x7fff'ffff) return pi.write<Size>(address, data, thread);

@@ -8,7 +8,10 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
+#include <vector>
 
 retro_environment_t  environ_cb         = nullptr;
 retro_video_refresh_t video_cb          = nullptr;
@@ -25,6 +28,43 @@ namespace {
     va_start(args, fmt);
     std::vfprintf(stderr, fmt, args);
     va_end(args);
+  }
+
+  std::string pipelineCachePath() {
+    if(!environ_cb) return {};
+    const char* dir = nullptr;
+    if(!environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &dir) || !dir) {
+      if(!environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &dir) || !dir) return {};
+    }
+    return std::string{dir} + "/ares-rdp-pipeline.cache";
+  }
+
+  void loadPipelineCache() {
+    auto path = pipelineCachePath();
+    if(path.empty()) return;
+    FILE* fp = std::fopen(path.c_str(), "rb");
+    if(!fp) return;
+    std::fseek(fp, 0, SEEK_END);
+    long size = std::ftell(fp);
+    std::fseek(fp, 0, SEEK_SET);
+    if(size > 0 && size < (1 << 28)) {
+      ares::Nintendo64::vulkan.pipelineCache.resize((size_t)size);
+      if(std::fread(ares::Nintendo64::vulkan.pipelineCache.data(), 1, (size_t)size, fp) != (size_t)size) {
+        ares::Nintendo64::vulkan.pipelineCache.clear();
+      }
+    }
+    std::fclose(fp);
+  }
+
+  void savePipelineCache() {
+    auto& blob = ares::Nintendo64::vulkan.pipelineCache;
+    if(blob.empty()) return;
+    auto path = pipelineCachePath();
+    if(path.empty()) return;
+    FILE* fp = std::fopen(path.c_str(), "wb");
+    if(!fp) return;
+    std::fwrite(blob.data(), 1, blob.size(), fp);
+    std::fclose(fp);
   }
 }
 
@@ -103,6 +143,21 @@ RETRO_API void retro_init(void) {
   enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_XRGB8888;
   if(environ_cb) environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt);
 
+  // paraLLEl-RDP otherwise compiles a unique compute pipeline per RDP state
+  // combination on first encounter, producing ~30-100ms stalls scattered
+  // throughout play. The ubershader path uses a single pipeline that handles
+  // every state at modest extra GPU cost — eliminates the stutter outright.
+  setenv("PARALLEL_RDP_UBERSHADER", "1", 0);
+
+#ifdef __APPLE__
+  // paraLLEl-RDP issues descriptor-heavy compute dispatches; argument buffers
+  // batch descriptor updates into one Metal binding, cutting per-dispatch CPU
+  // cost. Parallelizing the SPIR-V→MSL→Metal compile pipeline absorbs the
+  // remaining first-encounter pipeline stalls across cores.
+  setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "1", 0);
+  setenv("MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION", "1", 0);
+#endif
+
   mia::setSaveLocation([] { return string{}; });
 
   retro_rumble_interface rumble{};
@@ -173,6 +228,7 @@ RETRO_API void retro_cheat_set(unsigned, bool enabled, const char* code) {
 
 RETRO_API bool retro_load_game(const retro_game_info* game) {
   if(!game || !game->path) return false;
+  loadPipelineCache();
   return program.load(string{game->path});
 }
 
@@ -182,6 +238,7 @@ RETRO_API bool retro_load_game_special(unsigned, const retro_game_info*, size_t)
 
 RETRO_API void retro_unload_game(void) {
   program.unload();
+  savePipelineCache();
 }
 
 RETRO_API unsigned retro_get_region(void) {

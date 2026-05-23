@@ -296,6 +296,16 @@ auto CPU::Recompiler::section(u32 address) -> Section* {
   }
   if(dirty) {
     memory::jitprotect(false);
+    // Before dropping references, unlink any chained jumps INTO blocks in
+    // this section so stale predecessors fall back to the dispatcher stub.
+    if(chainingEnabled) {
+      for(u32 i = 0; i < SectionWords; i++) {
+        for(auto b = section->blocks[i]; b; b = b->next) {
+          if(b->inboundHead) unlinkInbound(b);
+          b->invalidated = true;
+        }
+      }
+    }
     *section = {};
     memory::jitprotect(true);
     sectionDirty[index] = 0;
@@ -355,8 +365,151 @@ auto CPU::Recompiler::block(u64 vaddr, u32 address) -> Block* {
       registerAlias(aliasAddress);
     }
     memory::jitprotect(true);
+    // Wire chain links: patch any predecessors that were waiting on this block,
+    // and patch our own outbound to any destinations that already exist.
+    linkInboundFromPending(block);
+    linkOutbound(block);
   }
   return block;
+}
+
+// === Block chaining ====================================================
+// Direct-jump linking between compiled blocks. The dispatcher stub is a
+// tiny sljit-compiled function that just returns to C++ — chained jumps
+// initially point at it and get patched to a real destination once the
+// destination block is compiled.
+
+auto CPU::Recompiler::ensureDispatcherStub() -> void {
+  if(dispatcherStub) return;
+  // Same calling convention as a normal block: prologue pushes savedRegs,
+  // we immediately jump to the function epilogue (pop + ret).
+  memory::jitprotect(false);
+  beginFunction(3, 3, 6);
+  jumpEpilog();
+  dispatcherStub = endFunction();
+  memory::jitprotect(true);
+}
+
+auto CPU::Recompiler::patchJumpTo(OutboundLink& link, u8* target) -> void {
+  memory::jitprotect(false);
+  sljit_set_jump_addr(link.jumpAddr, (sljit_uw)target, link.executableOffset);
+  memory::jitprotect(true);
+}
+
+// Look up a chain target. We only chain same-vaddrPage targets, where the
+// source's section base trivially gives us the target's paddr. Cross-page
+// branches and TLB-mapped pages bypass chaining and fall back to the C++
+// outer dispatcher.
+static auto findChainTarget(CPU::Recompiler* self, CPU::Recompiler::Block* fromBlock,
+    u64 targetVaddr, u64 targetStateKey) -> CPU::Recompiler::Block* {
+  using Rec = CPU::Recompiler;
+  u64 targetVaddrPage = targetVaddr & ~0xfffull;
+  if(targetVaddrPage != fromBlock->vaddrPage) return nullptr;
+  if(targetVaddr == ~0ull) return nullptr;
+  u32 sectionBase = fromBlock->startAddress & ~u32(Rec::SectionMask);
+  u32 targetPaddr = sectionBase + u32(targetVaddr - targetVaddrPage);
+  if(!self->isRdramAddress(targetPaddr)) return nullptr;
+  auto idx = self->sectionIndex(targetPaddr);
+  if(self->sectionDirty[idx]) return nullptr;
+  auto section = self->sections[idx];
+  if(!section) return nullptr;
+  auto blockIdx = self->blockIndex(targetPaddr);
+  for(auto b = section->blocks[blockIdx]; b; b = b->next) {
+    if(b->invalidated) continue;
+    if(b->stateKey == targetStateKey && b->vaddrPage == targetVaddrPage
+        && b->startAddress == targetPaddr) {
+      return b;
+    }
+  }
+  return nullptr;
+}
+
+auto CPU::Recompiler::linkOutbound(Block* src) -> void {
+  if(!chainingEnabled || !src) return;
+  ensureDispatcherStub();
+  for(u32 i = 0; i < src->outboundCount; i++) {
+    auto& link = src->outbound[i];
+    if(link.linkedTo) continue;  // already linked
+    // Only same-page targets are eligible (SMC-safety invariant: SectionShift
+    // == 12 makes section == page; dirty-marking on writes propagates within
+    // the same section, so any invalidation reaches predecessor and triggers
+    // unlinkInbound. Cross-page chains would let dst be invalidated while
+    // src stays clean, leaving src jumping into stale dst code).
+    u64 targetVaddrPage = link.targetVaddr & ~0xfffull;
+    if(targetVaddrPage != src->vaddrPage) continue;
+    auto dst = findChainTarget(this, src, link.targetVaddr, link.targetStateKey);
+    if(!dst) {
+      // Defer; record for later linking when the destination is compiled.
+      pendingChainLinks.push_back({link.targetVaddr, link.targetStateKey, src, i});
+      continue;
+    }
+    patchJumpTo(link, dst->entryPoint);
+    link.linkedTo = dst;
+    // Push onto destination's inbound list (intrusive).
+    link.nextInDest = dst->inboundHead;
+    dst->inboundHead = src;
+  }
+}
+
+auto CPU::Recompiler::linkInboundFromPending(Block* dst) -> void {
+  if(!chainingEnabled || !dst) return;
+  ensureDispatcherStub();
+  // Scan pending links for any that match this new block; patch and remove.
+  u64 dstVaddrStart = dst->vaddrPage | (dst->startAddress & 0xfff);
+  for(size_t i = 0; i < pendingChainLinks.size(); ) {
+    auto& p = pendingChainLinks[i];
+    bool match = (p.targetVaddr == dstVaddrStart)
+              && (p.targetStateKey == dst->stateKey)
+              && p.predecessor && !p.predecessor->invalidated
+              && p.outboundIndex < p.predecessor->outboundCount
+              // Re-apply same-page guard: defense in depth against any future
+              // path that enqueues a cross-page pending entry.
+              && (p.predecessor->vaddrPage == dst->vaddrPage);
+    if(!match) { i++; continue; }
+    auto& link = p.predecessor->outbound[p.outboundIndex];
+    if(!link.linkedTo) {
+      patchJumpTo(link, dst->entryPoint);
+      link.linkedTo = dst;
+      link.nextInDest = dst->inboundHead;
+      dst->inboundHead = p.predecessor;
+    }
+    // Swap-remove from pending list.
+    pendingChainLinks[i] = pendingChainLinks.back();
+    pendingChainLinks.pop_back();
+  }
+}
+
+// When a block is invalidated, all chained jumps INTO it must be patched
+// back to the dispatcher stub so the next entry falls into the C++ loop.
+auto CPU::Recompiler::unlinkInbound(Block* dst) -> void {
+  if(!chainingEnabled || !dst || !dispatcherStub) return;
+  // Single-step the intrusive list: at each node, find the FIRST link in pred
+  // that targets dst (gives us the next-in-list pointer), then patch and clear
+  // ALL of pred's links targeting dst before advancing. This handles the
+  // degenerate case where a single predecessor has multiple outbound links
+  // pointing at the same destination (e.g. a conditional branch whose taken
+  // and fallthrough vaddrs coincide — legal MIPS, e.g. BEQ $0,$0,1).
+  Block* pred = dst->inboundHead;
+  while(pred) {
+    Block* next = nullptr;
+    bool foundList = false;
+    for(u32 i = 0; i < pred->outboundCount; i++) {
+      auto& link = pred->outbound[i];
+      if(link.linkedTo != dst) continue;
+      if(!foundList) {
+        // First match dictates the next-in-list pointer; subsequent matches
+        // are duplicates that aren't actually on the list, so their nextInDest
+        // would self-reference or contain stale data — don't read it.
+        next = link.nextInDest;
+        foundList = true;
+      }
+      patchJumpTo(link, dispatcherStub);
+      link.linkedTo = nullptr;
+      link.nextInDest = nullptr;
+    }
+    pred = next;
+  }
+  dst->inboundHead = nullptr;
 }
 
 #define IpuBase        offsetof(IPU, r[16])
@@ -559,6 +712,7 @@ auto CPU::Recompiler::emit(u64 vaddr, u32 address, u64 stateKey) -> Block* {
   emitStateKeyChanged = false;
   emitAllocatorFlushed = false;
   emitAliasAddresses.clear();
+  emitOutbound.clear();
   if(unlikely(allocator.available() < 1_MiB)) {
     print("CPU JIT: flushing all blocks\n");
     allocator.release();
@@ -603,6 +757,14 @@ auto CPU::Recompiler::emit(u64 vaddr, u32 address, u64 stateKey) -> Block* {
 
   // Phase 3: begin host emission.
   beginFunction(3, 3, 6);
+  // Capture a label right after the ABI prologue. This is the chain-jump entry
+  // point: predecessor blocks JMP here so they bypass dst's prologue, which
+  // would otherwise clobber S0/S1/S2 by reloading them from the caller's arg
+  // regs (RDI/RSI/RDX) — but those are caller-save scratch and hold garbage at
+  // chain-jump time, so executing the prologue corrupts the cpu/ipu/fpu base
+  // pointers. Calls from C++ still target block->code (the function entry,
+  // which runs the prologue normally).
+  sljit_label* chainEntryLabel = sljit_emit_label(compiler);
   slowPaths.clear();
   emitDeferredCycles = 0;
 
@@ -641,8 +803,41 @@ auto CPU::Recompiler::emit(u64 vaddr, u32 address, u64 stateKey) -> Block* {
       if(target == branchFallthroughVaddr) fInt = true;
     }
     // This runs right after the branch delay slot.
-    // No internal edge: return to dispatcher.
-    if(!tInt && !fInt) { jumpEpilog(); return; }
+    // No internal edge: chain to next block if possible, else return to dispatcher.
+    if(!tInt && !fInt) {
+      bool tValid = branchTakenVaddr != ~0ull;
+      bool fValid = branchFallthroughVaddr != ~0ull;
+      if(chainingEnabled && tValid && fValid && emitOutbound.size() + 2 <= MaxOutbound) {
+        // Conditional branch: commit PC then emit two patchable jumps keyed on it.
+        mov64(reg(0), PipelineReg(pc));
+        mov64(mem(IpuReg(pc)), reg(0));
+        cmp64(reg(0), imm(s64(branchTakenVaddr)), set_z);
+        auto noTaken = jump(flag_nz);
+        sljit_jump* tk = sljit_emit_jump(compiler, SLJIT_JUMP | SLJIT_REWRITABLE_JUMP);
+        sljit_set_label(tk, epilogue);
+        emitOutbound.push_back({branchTakenVaddr, tk});
+        setLabel(noTaken);
+        cmp64(reg(0), imm(s64(branchFallthroughVaddr)), set_z);
+        auto noFall = jump(flag_nz);
+        sljit_jump* fl = sljit_emit_jump(compiler, SLJIT_JUMP | SLJIT_REWRITABLE_JUMP);
+        sljit_set_label(fl, epilogue);
+        emitOutbound.push_back({branchFallthroughVaddr, fl});
+        setLabel(noFall);
+        jumpEpilog();
+        return;
+      }
+      if(chainingEnabled && tValid && !fValid && emitOutbound.size() + 1 <= MaxOutbound) {
+        // Unconditional jump with known target — commit PC and chain.
+        mov64(reg(0), PipelineReg(pc));
+        mov64(mem(IpuReg(pc)), reg(0));
+        sljit_jump* tk = sljit_emit_jump(compiler, SLJIT_JUMP | SLJIT_REWRITABLE_JUMP);
+        sljit_set_label(tk, epilogue);
+        emitOutbound.push_back({branchTakenVaddr, tk});
+        return;
+      }
+      jumpEpilog();
+      return;
+    }
     if(tInt && fInt) {
       // Both edges internal: choose taken/fallthrough from runtime pipeline PC.
       cmp64(PipelineReg(pc), imm(s64(branchTakenVaddr)), set_z);
@@ -844,13 +1039,36 @@ auto CPU::Recompiler::emit(u64 vaddr, u32 address, u64 stateKey) -> Block* {
   memory::jitprotect(false);
   // Phase 6: publish block metadata.
   auto block = (Block*)allocator.acquire(sizeof(Block));
-  block->code = endFunction();
-  block->next = nullptr;
+  *block = {};
   block->stateKey = stateKey;
   block->vaddrPage = plan.startVaddr & ~0xfffull;
   block->startAddress = startAddress;
   block->endAddress = windowEndAddress;
   block->sectionDirty = sectionDirty.data() + startSection;
+
+  // Inline sljit_generate_code so we can query jump addresses + executable
+  // offset BEFORE resetCompiler destroys the compiler state.
+  u8* code = (u8*)sljit_generate_code(compiler, 0, &allocator);
+  allocator.reserve(sljit_get_generated_code_size(compiler));
+  sljit_sw exeOffset = sljit_get_executable_offset(compiler);
+  block->code = code;
+  // Chain entry is post-prologue so chained JMPs don't re-run the arg-loading
+  // moves that would clobber S0/S1/S2 with caller-save garbage.
+  block->entryPoint = (u8*)sljit_get_label_addr(chainEntryLabel);
+  block->executableOffset = exeOffset;
+  if(chainingEnabled) {
+    u32 n = (u32)std::min<size_t>(emitOutbound.size(), (size_t)MaxOutbound);
+    block->outboundCount = n;
+    for(u32 i = 0; i < n; i++) {
+      block->outbound[i].targetVaddr     = emitOutbound[i].targetVaddr;
+      block->outbound[i].targetStateKey  = stateKey;
+      block->outbound[i].jumpAddr        = sljit_get_jump_addr(emitOutbound[i].jump);
+      block->outbound[i].executableOffset = exeOffset;
+      block->outbound[i].linkedTo        = nullptr;
+      block->outbound[i].nextInDest      = nullptr;
+    }
+  }
+  resetCompiler();
 
   return block;
 }

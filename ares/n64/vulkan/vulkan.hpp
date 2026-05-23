@@ -1,5 +1,7 @@
 #include "rdp_device.hpp"
 
+#include <vector>
+
 namespace ares::Nintendo64 {
 
 struct Vulkan {
@@ -24,6 +26,8 @@ struct Vulkan {
   u32  internalUpscale = 1;  //1, 2, 4, 8
   bool supersampleScanout = false;
   u32  outputUpscale = supersampleScanout ? 1 : internalUpscale;
+
+  std::vector<u8> pipelineCache;
 };
 
 extern Vulkan vulkan;
