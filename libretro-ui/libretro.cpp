@@ -4,6 +4,8 @@
 #include "program.hpp"
 #include "libretro_core_options.h"
 
+#include <n64/n64.hpp>
+
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -188,16 +190,18 @@ RETRO_API unsigned retro_get_region(void) {
 
 RETRO_API void* retro_get_memory_data(unsigned id) {
   switch(id) {
-    case RETRO_MEMORY_SAVE_RAM: return saveRegions[0].data;
-    case RETRO_MEMORY_RTC:      return saveRegions[3].data;
+    case RETRO_MEMORY_SAVE_RAM:   return saveRegions[0].data;
+    case RETRO_MEMORY_RTC:        return saveRegions[3].data;
+    case RETRO_MEMORY_SYSTEM_RAM: return program.loaded ? ares::Nintendo64::rdram.ram.data : nullptr;
     default: return nullptr;
   }
 }
 
 RETRO_API size_t retro_get_memory_size(unsigned id) {
   switch(id) {
-    case RETRO_MEMORY_SAVE_RAM: return saveRegions[0].size;
-    case RETRO_MEMORY_RTC:      return saveRegions[3].size;
+    case RETRO_MEMORY_SAVE_RAM:   return saveRegions[0].size;
+    case RETRO_MEMORY_RTC:        return saveRegions[3].size;
+    case RETRO_MEMORY_SYSTEM_RAM: return program.loaded ? ares::Nintendo64::rdram.ram.size : 0;
     default: return 0;
   }
 }
