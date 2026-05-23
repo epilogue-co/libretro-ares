@@ -23,9 +23,20 @@ set(
 )
 # gersemi: on
 
+option(ARES_BUILD_LIBRETRO "Build the libretro shared-library core (libretro-ui/) instead of the desktop UI" OFF)
+
+if(ARES_BUILD_LIBRETRO)
+  set(ARES_CORES "n64" CACHE STRING "List of systems to be built by the project" FORCE)
+endif()
+
 add_subdirectory(ares)
 add_subdirectory(mia)
-add_subdirectory(desktop-ui)
+
+if(ARES_BUILD_LIBRETRO)
+  add_subdirectory(libretro-ui)
+else()
+  add_subdirectory(desktop-ui)
+endif()
 
 option(ARES_BUILD_OPTIONAL_TARGETS "Include supplemental tools and tests" OFF)
 
