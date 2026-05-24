@@ -2,6 +2,13 @@
 
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](https://github.com/higan-emu/ares/blob/master/LICENSE)
 
+About this fork
+---------------
+
+This fork of ares is maintained by [Epilogue](https://epilogue.co) for use in [Playback](https://epilogue.co). See [NOTICE.md](NOTICE.md) for contribution attribution.
+
+---
+
 **ares** is a multi-system emulator that began development on October 14th, 2004.
 It is a descendant of [higan](https://github.com/higan-emu/higan) and [bsnes](https://github.com/bsnes-emu/bsnes/), and focuses on accuracy and preservation.
 
