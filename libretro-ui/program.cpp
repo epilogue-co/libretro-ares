@@ -228,6 +228,13 @@ auto Program::videoOptionsFromCore() -> void {
   ares::Nintendo64::option("Homebrew Mode", enabled("ares_n64_homebrew_mode"));
   ares::Nintendo64::vulkan.framePersistence = enabled("ares_n64_frame_persistence");
 
+  string mode = getVar("ares_n64_performance_mode");
+  bool balanced    = (mode == "balanced" || mode == "performance");
+  bool performance = (mode == "performance");
+  ares::Nintendo64::vulkan.skipScanoutFence = balanced;
+  ares::Nintendo64::vulkan.relaxedViFilter  = performance;
+  ares::Nintendo64::cpu.recompiler.interleaveMultiplier = balanced ? 2 : 1;
+
   setenv("PARALLEL_RDP_UBERSHADER", getVar("ares_n64_renderer") == "specialized" ? "0" : "1", 1);
 
 #if defined(VULKAN)

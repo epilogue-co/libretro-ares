@@ -1262,6 +1262,7 @@ struct CPU : Thread {
     struct PendingEmitOutbound { u64 targetVaddr; sljit_jump* jump; };
     std::vector<PendingEmitOutbound> emitOutbound;
     bool chainingEnabled = true;
+    u32 interleaveMultiplier = 1;
 
     auto ensureDispatcherStub() -> void;
     auto linkOutbound(Block* src) -> void;

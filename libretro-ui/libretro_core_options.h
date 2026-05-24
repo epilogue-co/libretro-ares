@@ -6,13 +6,22 @@
 #include "libretro.h"
 
 static const retro_core_option_v2_category option_cats[] = {
-  {"video",    "Video",    "GPU rendering and upscaling"},
-  {"cpu",      "CPU",      "Recompiler vs interpreter"},
-  {"hardware", "Hardware", "Console hardware options"},
+  {"performance", "Performance", "Trade emulation accuracy for gameplay smoothness"},
+  {"video",       "Video",       "GPU rendering and upscaling"},
+  {"cpu",         "CPU",         "Recompiler vs interpreter"},
+  {"hardware",    "Hardware",    "Console hardware options"},
   {nullptr, nullptr, nullptr},
 };
 
 static const retro_core_option_v2_definition option_defs[] = {
+  {
+    "ares_n64_performance_mode",
+    "Performance Mode", nullptr,
+    "Accurate: full cycle-accurate emulation (default). Balanced: relaxes CPU↔GPU synchronization for ~10% gain; a small number of games (Resident Evil 2, Jet Force Gemini, Pokémon Snap, Body Harvest) may show visual glitches. Performance: above plus reduced VI filtering for ~20% gain at the cost of softer post-processing.",
+    nullptr, "performance",
+    {{"accurate", "Accurate"}, {"balanced", "Balanced"}, {"performance", "Performance"}, {nullptr, nullptr}},
+    "accurate"
+  },
   {
     "ares_n64_quality",
     "Internal Resolution", nullptr,

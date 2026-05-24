@@ -154,7 +154,7 @@ auto CPU::instruction() -> bool {
         if(timerDelta < 0) timerDelta = 0;
         s64 queueDelta = queue.timeToNextEvent();
         if(queueDelta < 0) queueDelta = 0;
-        s64 capBudget = min<s64>(Accuracy::CPU::JitInterleaving, min(timerDelta, queueDelta));
+        s64 capBudget = min<s64>(s64(Accuracy::CPU::JitInterleaving) * recompiler.interleaveMultiplier, min(timerDelta, queueDelta));
         jitClockTarget = Thread::clock + capBudget;
       }
       block->execute(*this);

@@ -161,7 +161,7 @@ auto Vulkan::writeWord(u32 address, u32 data) -> void {
 auto Vulkan::scanoutAsync(bool field) -> bool {
   if(!implementation) return false;
 
-  { //wait until we're done reading in thread before we clobber the readback buffer
+  if(!skipScanoutFence) { //wait until we're done reading in thread before we clobber the readback buffer
     std::unique_lock<std::mutex> lock{implementation->lock};
     implementation->condition.wait(lock, [this]() {
       return implementation->scanoutCount == implementation->endCount;
@@ -194,9 +194,14 @@ auto Vulkan::scanoutAsync(bool field) -> bool {
     options.upscale_deinterlacing = true;
   }
   if(framePersistence) options.blend_previous_frame = true;
+  if(relaxedViFilter) {
+    options.vi.divot_filter = false;
+    options.vi.dither_filter = false;
+    options.vi.gamma_dither = false;
+  }
 
 
-  if(implementation->scanout.fence) {
+  if(implementation->scanout.fence && !skipScanoutFence) {
     implementation->scanout.fence->wait();
   }
   implementation->processor->scanout_async_buffer(implementation->scanout, options);
@@ -210,7 +215,7 @@ auto Vulkan::mapScanoutRead(const u8*& rgba, u32& width, u32& height) -> void {
     width = 0;
     height = 0;
   } else {
-    implementation->scanout.fence->wait();
+    if(!skipScanoutFence) implementation->scanout.fence->wait();
     rgba = (const u8*)implementation->device.map_host_buffer(*implementation->scanout.buffer, ::Vulkan::MEMORY_ACCESS_READ_BIT);
     width = implementation->scanout.width;
     height = implementation->scanout.height;
