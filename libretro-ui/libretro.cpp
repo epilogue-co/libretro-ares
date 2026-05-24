@@ -143,12 +143,6 @@ RETRO_API void retro_init(void) {
   enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_XRGB8888;
   if(environ_cb) environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt);
 
-  // paraLLEl-RDP otherwise compiles a unique compute pipeline per RDP state
-  // combination on first encounter, producing ~30-100ms stalls scattered
-  // throughout play. The ubershader path uses a single pipeline that handles
-  // every state at modest extra GPU cost — eliminates the stutter outright.
-  setenv("PARALLEL_RDP_UBERSHADER", "1", 0);
-
 #ifdef __APPLE__
   // paraLLEl-RDP issues descriptor-heavy compute dispatches; argument buffers
   // batch descriptor updates into one Metal binding, cutting per-dispatch CPU

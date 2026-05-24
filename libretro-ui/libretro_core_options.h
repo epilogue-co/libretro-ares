@@ -46,6 +46,22 @@ static const retro_core_option_v2_definition option_defs[] = {
     "disabled"
   },
   {
+    "ares_n64_frame_persistence",
+    "Motion Blur", nullptr,
+    "Blends each scanout with the previous one, approximating CRT phosphor persistence. Smooths motion at the cost of some ghosting.",
+    nullptr, "video",
+    {{"enabled", "On"}, {"disabled", "Off"}, {nullptr, nullptr}},
+    "enabled"
+  },
+  {
+    "ares_n64_renderer",
+    "Renderer", nullptr,
+    "Ubershader: one shader handles every RDP state — no compile stalls, modest steady-state GPU cost. Specialized: faster steady-state but pays compile cost on first encounter of each state combination (cached across sessions). Takes effect on next game load.",
+    nullptr, "video",
+    {{"ubershader", "Ubershader"}, {"specialized", "Specialized"}, {nullptr, nullptr}},
+    "ubershader"
+  },
+  {
     "ares_n64_recompiler",
     "CPU Recompiler", nullptr,
     "Use JIT recompilation for the R4300 CPU. Disable to fall back to interpreter (slower, edge-case accuracy).",

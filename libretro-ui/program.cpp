@@ -5,6 +5,7 @@
 
 #include <n64/n64.hpp>
 
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -216,13 +217,18 @@ auto Program::videoOptionsFromCore() -> void {
     return {};
   };
 
+  auto enabled = [&](const char* key) { return getVar(key) == "enabled"; };
+
   if(auto v = getVar("ares_n64_quality")) ares::Nintendo64::option("Quality", v);
-  if(auto v = getVar("ares_n64_supersampling")) ares::Nintendo64::option("Supersampling", v == "enabled");
-  if(auto v = getVar("ares_n64_vi_processing")) ares::Nintendo64::option("Disable Video Interface Processing", v == "disabled");
-  if(auto v = getVar("ares_n64_weave_deinterlacing")) ares::Nintendo64::option("Weave Deinterlacing", v == "enabled");
-  if(auto v = getVar("ares_n64_recompiler")) ares::Nintendo64::option("Recompiler", v == "enabled");
-  if(auto v = getVar("ares_n64_expansion_pak")) ares::Nintendo64::option("Expansion Pak", v == "enabled");
-  if(auto v = getVar("ares_n64_homebrew_mode")) ares::Nintendo64::option("Homebrew Mode", v == "enabled");
+  ares::Nintendo64::option("Supersampling", enabled("ares_n64_supersampling"));
+  ares::Nintendo64::option("Disable Video Interface Processing", !enabled("ares_n64_vi_processing"));
+  ares::Nintendo64::option("Weave Deinterlacing", enabled("ares_n64_weave_deinterlacing"));
+  ares::Nintendo64::option("Recompiler", enabled("ares_n64_recompiler"));
+  ares::Nintendo64::option("Expansion Pak", enabled("ares_n64_expansion_pak"));
+  ares::Nintendo64::option("Homebrew Mode", enabled("ares_n64_homebrew_mode"));
+  ares::Nintendo64::vulkan.framePersistence = enabled("ares_n64_frame_persistence");
+
+  setenv("PARALLEL_RDP_UBERSHADER", getVar("ares_n64_renderer") == "specialized" ? "0" : "1", 1);
 
 #if defined(VULKAN)
   ares::Nintendo64::option("Enable GPU acceleration", true);

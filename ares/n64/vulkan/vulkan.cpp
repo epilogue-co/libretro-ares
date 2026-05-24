@@ -193,6 +193,7 @@ auto Vulkan::scanoutAsync(bool field) -> bool {
     options.blend_previous_frame = false;
     options.upscale_deinterlacing = true;
   }
+  if(framePersistence) options.blend_previous_frame = true;
 
 
   if(implementation->scanout.fence) {

@@ -23,6 +23,7 @@ struct Vulkan {
   bool enable = true;
   bool disableVideoInterfaceProcessing = false;
   bool weaveDeinterlacing = false;
+  bool framePersistence = false;
   u32  internalUpscale = 1;  //1, 2, 4, 8
   bool supersampleScanout = false;
   u32  outputUpscale = supersampleScanout ? 1 : internalUpscale;
