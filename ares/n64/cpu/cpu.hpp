@@ -1263,10 +1263,6 @@ struct CPU : Thread {
     std::vector<PendingEmitOutbound> emitOutbound;
     bool chainingEnabled = true;
     u32 interleaveMultiplier = 1;
-    // Per-instruction fusion hint set by the emit loop before each emitEXECUTE
-    // and consumed by the LUI/ORI handlers. 0=none, 1=LUI to skip, 2=ORI to fuse.
-    u8 emitFusePattern = 0;
-    u32 emitFuseImmediate = 0;
 
     auto ensureDispatcherStub() -> void;
     auto linkOutbound(Block* src) -> void;
