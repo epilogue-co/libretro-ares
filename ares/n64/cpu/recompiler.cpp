@@ -551,6 +551,8 @@ struct EmitPlannedInstruction {
   u32 address = 0;
   u32 instruction = 0;
   ares::Nintendo64::CPU::OpInfo info = {};
+  u8 fusePattern = 0;     // 0=none, 1=LUI prefix of fused pair, 2=ORI suffix of fused pair
+  u32 fuseImmediate = 0;  // suffix: combined 32-bit constant to load
 };
 
 struct EmitPlan {
@@ -699,6 +701,31 @@ auto buildEmitPlan(ares::Nintendo64::CPU::Recompiler& recompiler, u64 vaddr, u32
     u32 targetAddress = plan.startAddress + u32(targetVaddr - plan.startVaddr);
     if(recompiler.sectionIndex(targetAddress) != plan.startSection) continue;
     addAliasAddress(targetAddress);
+  }
+
+  // Peephole: fuse adjacent LUI Rt,uhi / ORI Rt,Rt,lo into a single 32-bit mov.
+  // Conservative: skip if either side is a branch, if LUI is in a delay slot,
+  // or if the ORI is reachable as an internal entry point (external entry
+  // would otherwise observe a different prior value of Rt).
+  auto isInternalEntry = [&](u64 v) {
+    for(auto e : plan.internalEntryVaddrs) if(e == v) return true;
+    return false;
+  };
+  for(size_t i = 0; i + 1 < plan.instructions.size(); i++) {
+    auto& a = plan.instructions[i];
+    auto& b = plan.instructions[i + 1];
+    if((a.instruction >> 26) != 0x0f) continue;     // a not LUI
+    if((b.instruction >> 26) != 0x0d) continue;     // b not ORI
+    u32 aRt = (a.instruction >> 16) & 31;
+    u32 bRt = (b.instruction >> 16) & 31;
+    u32 bRs = (b.instruction >> 21) & 31;
+    if(aRt == 0 || aRt != bRt || bRs != aRt) continue;
+    if(a.info.branch() || b.info.branch()) continue;
+    if(i > 0 && plan.instructions[i - 1].info.branch()) continue;  // LUI is a delay slot
+    if(isInternalEntry(b.vaddr)) continue;
+    a.fusePattern = 1;
+    b.fusePattern = 2;
+    b.fuseImmediate = u32((a.instruction & 0xffff) << 16) | u32(b.instruction & 0xffff);
   }
 
   return plan;
@@ -932,7 +959,10 @@ auto CPU::Recompiler::emit(u64 vaddr, u32 address, u64 stateKey) -> Block* {
     auto slowPathStart = slowPaths.size();
     // Branch emitters require a ready pipeline window.
     if(info.branch()) setupPipeline();
+    emitFusePattern = ii.fusePattern;
+    emitFuseImmediate = ii.fuseImmediate;
     auto emitResult = emitEXECUTE(instruction, false, emitPcMode);
+    emitFusePattern = 0;
     bool branched = emitResult == EmitExecuteResult::MayBranch;
     u32 instructionCycles = 1 * 2;
     u32 jumpToSelf = 2 << 26 | u32(ii.vaddr >> 2 & 0x3ff'ffff);

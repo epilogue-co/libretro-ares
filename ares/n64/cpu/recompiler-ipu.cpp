@@ -623,6 +623,10 @@ auto CPU::Recompiler::emitEXECUTE(u32 instruction, bool emitSlowPath, EmitPcMode
   //ORI Rt,Rs,n16
   case 0x0d: {
     if(Rtn == 0) return EmitExecuteResult::Linear;
+    if(emitFusePattern == 2) {
+      mov64(mem(Rt), imm(s64(s32(emitFuseImmediate))));
+      return EmitExecuteResult::Linear;
+    }
     or64(mem(Rt), mem(Rs), imm(n16));
     return EmitExecuteResult::Linear;
   }
@@ -637,6 +641,7 @@ auto CPU::Recompiler::emitEXECUTE(u32 instruction, bool emitSlowPath, EmitPcMode
   //LUI Rt,n16
   case 0x0f: {
     if(Rtn == 0) return EmitExecuteResult::Linear;
+    if(emitFusePattern == 1) return EmitExecuteResult::Linear;  // suppressed; fused ORI emits the combined mov
     mov64(mem(Rt), imm(s32(n16 << 16)));
     return EmitExecuteResult::Linear;
   }
