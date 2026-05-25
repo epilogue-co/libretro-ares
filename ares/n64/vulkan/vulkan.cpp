@@ -1,7 +1,5 @@
 #include <n64/n64.hpp>
 
-#include <memory>
-
 namespace ares::Nintendo64 {
 
 Vulkan vulkan;
@@ -15,10 +13,14 @@ struct LoggingInterface : Util::LoggingInterface {
   }
 } loggingInterface;
 
-// In HW_RENDER mode the Context is created during libretro negotiation
-// (Vulkan::createDeviceFromInstance) and must outlive the Implementation
-// teardown/rebuild cycles. Stored as a process-wide unique_ptr.
-static std::unique_ptr<::Vulkan::Context> g_externalContext;
+// HW_RENDER Context: created in createDeviceFromInstance, destroyed in
+// destroyExternalDevice. Deliberately a raw pointer rather than a
+// std::unique_ptr so that no static destructor runs at process exit — at
+// that point the frontend's VkDevice is already gone, and paraLLEl-RDP's
+// ~Context calls vkDeviceWaitIdle unconditionally (it gates only the
+// destroy on owned_device, not the wait). If the frontend forgets to
+// invoke destroy_device we leak the Context, which is harmless at exit.
+static ::Vulkan::Context* g_externalContext = nullptr;
 
 struct Vulkan::Implementation {
   Implementation(u8* data, u32 size);
@@ -288,7 +290,7 @@ Vulkan::Implementation::Implementation(u8* data, u32 size) {
   //  - Internal (fallback): create our own instance + device as before.
   ::Vulkan::Context* activeContext = nullptr;
   if(vulkan.useExternalContext && g_externalContext) {
-    activeContext = g_externalContext.get();
+    activeContext = g_externalContext;
   } else {
     if(!::Vulkan::Context::init_loader(nullptr)) return;
     if(!context.init_instance_and_device(nullptr, 0, nullptr, 0, 0)) return;
@@ -351,12 +353,14 @@ auto Vulkan::createDeviceFromInstance(
 
   // Create the Context once; it will be reused by Implementation, so the
   // same VkDevice is shared with the frontend (no second logical device).
-  g_externalContext = std::make_unique<::Vulkan::Context>();
+  if(g_externalContext) { delete g_externalContext; g_externalContext = nullptr; }
+  g_externalContext = new ::Vulkan::Context;
   if(!g_externalContext->init_device_from_instance(
        instance, gpu, surface,
        required_device_extensions, num_required_device_extensions,
        required_features, 0)) {
-    g_externalContext.reset();
+    delete g_externalContext;
+    g_externalContext = nullptr;
     return false;
   }
 
@@ -402,7 +406,10 @@ auto Vulkan::destroyExternalDevice() -> void {
     delete implementation;
     implementation = nullptr;
   }
-  g_externalContext.reset();
+  if(g_externalContext) {
+    delete g_externalContext;
+    g_externalContext = nullptr;
+  }
   useExternalContext       = false;
   externalInstance         = VK_NULL_HANDLE;
   externalGpu              = VK_NULL_HANDLE;
