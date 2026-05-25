@@ -99,13 +99,14 @@ static void updateRefreshRateIfChanged() {
   if(refreshRateStable == refreshRateStableThreshold) {
     ++refreshRateStable;
     if(std::abs(measured - program.refreshRate) > refreshRateUpdateEpsilon) {
+      double previous = program.refreshRate;
       program.refreshRate = measured;
       retro_system_av_info av = {};
       retro_get_system_av_info(&av);
       if(environ_cb) environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
       if(log_cb) log_cb(RETRO_LOG_INFO,
         "ares: VI refresh rate updated to %.3f Hz (was %.3f Hz)\n",
-        measured, program.refreshRate);
+        measured, previous);
     }
   }
 }
