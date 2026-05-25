@@ -212,20 +212,18 @@ auto Vulkan::scanoutAsync(bool field) -> bool {
 
   if(hwRenderActive) {
     // Zero-copy GPU path: keep the rendered VkImage and publish it for the
-    // libretro frontend to consume via set_image(). No CPU readback.
-    //
-    // paraLLEl-RDP's command processor runs on its own thread; scanout()
-    // returns the destination VkImage but the GPU work to fill it may not
-    // be flushed yet. Signal a timeline value and wait on it — this both
-    // forces the processor to push its commands to the queue AND blocks
-    // until the GPU finishes rendering, so the frontend reads coherent
-    // pixels. Without this, half-textures-wrong / torn frames appear,
-    // especially at internal upscale > 1x where the per-scanout work is
-    // heavier.
+    // libretro frontend to consume via set_image(). No CPU readback, no
+    // host stall: scanout() drains the command-processing thread, signals
+    // the renderer (flush_and_signal), and submits the VI command buffer
+    // (containing the final image_barrier transitioning the returned image
+    // to SHADER_READ_ONLY_OPTIMAL) to the graphics queue before returning.
+    // The frontend submits its sampling work to the same queue, so in-queue
+    // ordering provides the read-after-write guarantee — no semaphore or
+    // host wait is required. Pattern matches mupen64plus-video-paraLLEl and
+    // beetle-psx-hw, both of which omit any wait between scanout and
+    // set_image.
     implementation->hwRenderScanoutImage =
       implementation->processor->scanout(options);
-    implementation->processor->wait_for_timeline(
-      implementation->processor->signal_timeline());
     if(implementation->hwRenderScanoutImage) {
       lastImage       = implementation->hwRenderScanoutImage->get_image();
       lastImageView   = implementation->hwRenderScanoutImage->get_view().get_view();
