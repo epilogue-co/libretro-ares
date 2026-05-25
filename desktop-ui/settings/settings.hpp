@@ -24,8 +24,10 @@ struct Settings : Markup::Node {
     bool nativeFullScreen = false;
     bool flush = false;
     string shader = "None";
-    u32 multiplier = 2;
+    u32 windowWidth = 800;
+    u32 windowHeight = 576;
     string output = "Scale";
+    u32 fixedScale = 2;
     string aspectCorrection = "Standard";
     bool adaptiveSizing = true;
     bool autoCentering = false;

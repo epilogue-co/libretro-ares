@@ -22,6 +22,7 @@ struct InputMapping {
     auto text() -> string;
 
     std::shared_ptr<HID::Device> device;
+    string deviceIdentifier;
     u64 deviceID = 0;
     u32 groupID = 0;
     u32 inputID = 0;
@@ -91,24 +92,22 @@ struct InputNode {
   std::shared_ptr<InputMapping> directMapping;
 
   auto configuredMapping() -> InputMapping& {
-    return directMapping ? *directMapping : *mapping;
+    if(directMapping) return *directMapping;
+    return *mapping;
   }
 
   auto effectiveMapping() -> InputMapping& {
-    if(mappingMode == MappingMode::Direct) {
-      assert(directMapping);
-      if(directMapping) return *directMapping;
-    }
     if(directMapping && directMapping->assigned()) return *directMapping;
     return *mapping;
   }
 
   auto inheritedMapping() -> bool {
-    return mappingMode == MappingMode::VirtualPad && directMapping && !directMapping->assigned() && mapping->assigned();
+    return directMapping && !directMapping->assigned() && mapping->assigned();
   }
 
   auto setMappingMode(MappingMode mode) -> void {
     mappingMode = mode;
+    if(mode != MappingMode::VirtualPad) return;
     if(directMapping) return;
     if(type == Type::Digital ) directMapping = std::make_shared<InputDigital>();
     if(type == Type::Analog  ) directMapping = std::make_shared<InputAnalog>();
@@ -130,33 +129,28 @@ struct InputPair {
   std::shared_ptr<InputMapping> directMappingHi;
 
   auto configuredMappingLo() -> InputMapping& {
-    return directMappingLo ? *directMappingLo : *mappingLo;
+    if(directMappingLo) return *directMappingLo;
+    return *mappingLo;
   }
 
   auto configuredMappingHi() -> InputMapping& {
-    return directMappingHi ? *directMappingHi : *mappingHi;
+    if(directMappingHi) return *directMappingHi;
+    return *mappingHi;
   }
 
   auto effectiveMappingLo() -> InputMapping& {
-    if(mappingMode == MappingMode::Direct) {
-      assert(directMappingLo);
-      if(directMappingLo) return *directMappingLo;
-    }
     if(directMappingLo && directMappingLo->assigned()) return *directMappingLo;
     return *mappingLo;
   }
 
   auto effectiveMappingHi() -> InputMapping& {
-    if(mappingMode == MappingMode::Direct) {
-      assert(directMappingHi);
-      if(directMappingHi) return *directMappingHi;
-    }
     if(directMappingHi && directMappingHi->assigned()) return *directMappingHi;
     return *mappingHi;
   }
 
   auto setMappingMode(MappingMode mode) -> void {
     mappingMode = mode;
+    if(mode != MappingMode::VirtualPad) return;
     if(type == Type::Analog) {
       if(!directMappingLo) directMappingLo = std::make_shared<InputAnalog>();
       if(!directMappingHi) directMappingHi = std::make_shared<InputAnalog>();
@@ -168,7 +162,9 @@ struct InputPair {
 
 struct InputDevice {
   InputDevice() = default;
-  InputDevice(string name) : name(name) {}
+  InputDevice(string name) : name(name) {
+    setMappingMode(MappingMode::VirtualPad);
+  }
 
   auto digital(string name, InputMapping& mapping) -> void {
     inputs.push_back({InputNode::Type::Digital, name, &mapping});
@@ -198,6 +194,10 @@ struct InputDevice {
   auto analog(string name, InputMapping& mappingLo, InputMapping& mappingHi) -> void {
     pairs.push_back({InputPair::Type::Analog, name, &mappingLo, &mappingHi});
     if(mappingModeConfigured) pairs.back().setMappingMode(mappingMode);
+    for(auto& input : inputs) {
+      if(input.mapping == &mappingLo && input.directMapping) pairs.back().directMappingLo = input.directMapping;
+      if(input.mapping == &mappingHi && input.directMapping) pairs.back().directMappingHi = input.directMapping;
+    }
   }
 
   auto setMappingMode(MappingMode mode) -> void {
@@ -208,6 +208,7 @@ struct InputDevice {
   }
 
   auto hasDirectMappings() -> bool {
+    if(mappingMode == MappingMode::Direct) return true;
     for(auto& input : inputs) {
       if(input.directMapping) return true;
     }

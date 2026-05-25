@@ -64,8 +64,10 @@ auto Settings::process(bool load) -> void {
   bind(boolean, "Video/NativeFullScreen", video.nativeFullScreen);
   bind(boolean, "Video/Flush", video.flush);
   bind(string,  "Video/Shader", video.shader);
-  bind(natural, "Video/Multiplier", video.multiplier);
+  bind(natural, "Video/WindowWidth", video.windowWidth);
+  bind(natural, "Video/WindowHeight", video.windowHeight);
   bind(string,  "Video/Output", video.output);
+  bind(natural, "Video/FixedScale", video.fixedScale);
   bind(string,  "Video/AspectCorrectionMode", video.aspectCorrection);
   bind(boolean, "Video/AdaptiveSizing", video.adaptiveSizing);
   bind(boolean, "Video/AutoCentering", video.autoCentering);

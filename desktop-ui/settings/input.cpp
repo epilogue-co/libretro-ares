@@ -55,12 +55,10 @@ auto InputSettings::deviceChange() -> void {
   auto& device = port.devices[deviceList.selected().offset()];
   if(systemList.selected().offset() == 0) {
     inputHint.setText("Map Virtual Gamepads to match your physical controller; compatible systems use these mappings automatically.");
-  } else if(device.hasDirectMappings() && device.mappingMode == MappingMode::VirtualPad) {
-    inputHint.setText("System mappings override Virtual Gamepad defaults; gray mappings are inherited from the Virtual Gamepad.");
-  } else if(device.mappingMode == MappingMode::VirtualPad) {
-    inputHint.setText("This device uses Virtual Gamepad mappings automatically.");
-  } else {
+  } else if(device.mappingMode == MappingMode::Direct) {
     inputHint.setText("This device has unique inputs and does not inherit Virtual Gamepad mappings.");
+  } else {
+    inputHint.setText("System mappings override Virtual Gamepad defaults; gray mappings are inherited from the Virtual Gamepad.");
   }
   for(auto& input : device.inputs) {
     TableViewItem item{&inputList};
