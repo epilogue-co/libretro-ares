@@ -95,6 +95,19 @@ struct Cartridge {
   auto region() const -> string { return information.region; }
   auto cic() const -> string { return information.cic; }
 
+  // Save-RAM dirty tracking for the libretro auto-save callback.
+  // Matches mgba's int-bitmask state machine: every cart save-memory
+  // write OR's in DirtyNew; the libretro wrapper's per-frame clean()
+  // promotes New->Seen, stamps the frame, and clears Seen after a
+  // 15-frame cooldown. The falling edge of saveDirtyState fires the
+  // save_updated_cb. Single-threaded — all writes happen on the CPU
+  // thread, no atomicity needed.
+  static constexpr u32 DirtyNew  = 1;
+  static constexpr u32 DirtySeen = 2;
+  u32 saveDirtyState = 0;
+  u32 saveLastDirtyFrame = 0;
+  auto markSaveDirty() -> void { saveDirtyState |= DirtyNew; }
+
   //cartridge.cpp
   auto allocate(Node::Port) -> Node::Peripheral;
   auto connect() -> void;

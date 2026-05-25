@@ -1,5 +1,7 @@
 #include <n64/n64.hpp>
 
+#include <memory>
+
 namespace ares::Nintendo64 {
 
 Vulkan vulkan;
@@ -13,14 +15,26 @@ struct LoggingInterface : Util::LoggingInterface {
   }
 } loggingInterface;
 
+// In HW_RENDER mode the Context is created during libretro negotiation
+// (Vulkan::createDeviceFromInstance) and must outlive the Implementation
+// teardown/rebuild cycles. Stored as a process-wide unique_ptr.
+static std::unique_ptr<::Vulkan::Context> g_externalContext;
+
 struct Vulkan::Implementation {
   Implementation(u8* data, u32 size);
   ~Implementation();
 
+  // Internal-mode Context. In external mode (HW_RENDER) it stays default-
+  // constructed; device.set_context() points at g_externalContext instead.
   ::Vulkan::Context context;
   ::Vulkan::Device device;
   ::RDP::CommandProcessor* processor = nullptr;
   atomic<const char*> crash_error = nullptr;
+
+  // HW_RENDER path keeps the latest scanout ImageHandle alive across the
+  // frame so the VkImage/View remain valid until the frontend has consumed
+  // them via set_image().
+  ::Vulkan::ImageHandle hwRenderScanoutImage;
 
   struct Validation : public ::RDP::ValidationInterface {
     Implementation& self;
@@ -196,6 +210,38 @@ auto Vulkan::scanoutAsync(bool field) -> bool {
   if(framePersistence) options.blend_previous_frame = true;
 
 
+  if(hwRenderActive) {
+    // Zero-copy GPU path: keep the rendered VkImage and publish it for the
+    // libretro frontend to consume via set_image(). No CPU readback.
+    //
+    // paraLLEl-RDP's command processor runs on its own thread; scanout()
+    // returns the destination VkImage but the GPU work to fill it may not
+    // be flushed yet. Signal a timeline value and wait on it — this both
+    // forces the processor to push its commands to the queue AND blocks
+    // until the GPU finishes rendering, so the frontend reads coherent
+    // pixels. Without this, half-textures-wrong / torn frames appear,
+    // especially at internal upscale > 1x where the per-scanout work is
+    // heavier.
+    implementation->hwRenderScanoutImage =
+      implementation->processor->scanout(options);
+    implementation->processor->wait_for_timeline(
+      implementation->processor->signal_timeline());
+    if(implementation->hwRenderScanoutImage) {
+      lastImage       = implementation->hwRenderScanoutImage->get_image();
+      lastImageView   = implementation->hwRenderScanoutImage->get_view().get_view();
+      lastImageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      lastImageFormat = implementation->hwRenderScanoutImage->get_format();
+      lastImageWidth  = implementation->hwRenderScanoutImage->get_width();
+      lastImageHeight = implementation->hwRenderScanoutImage->get_height();
+    } else {
+      lastImage = VK_NULL_HANDLE;
+      lastImageView = VK_NULL_HANDLE;
+      lastImageWidth = lastImageHeight = 0;
+    }
+    implementation->scanoutCount++;
+    return true;
+  }
+
   if(implementation->scanout.fence) {
     implementation->scanout.fence->wait();
   }
@@ -238,9 +284,19 @@ auto Vulkan::crashed() -> const char* {
 }
 
 Vulkan::Implementation::Implementation(u8* data, u32 size) {
-  if(!::Vulkan::Context::init_loader(nullptr)) return;
-  if(!context.init_instance_and_device(nullptr, 0, nullptr, 0, 0)) return;
-  device.set_context(context);
+  // Two code paths:
+  //  - External (HW_RENDER): g_externalContext was set up during libretro
+  //    negotiation. Reuse it — DO NOT create a second device.
+  //  - Internal (fallback): create our own instance + device as before.
+  ::Vulkan::Context* activeContext = nullptr;
+  if(vulkan.useExternalContext && g_externalContext) {
+    activeContext = g_externalContext.get();
+  } else {
+    if(!::Vulkan::Context::init_loader(nullptr)) return;
+    if(!context.init_instance_and_device(nullptr, 0, nullptr, 0, 0)) return;
+    activeContext = &context;
+  }
+  device.set_context(*activeContext);
   device.init_frame_contexts(3);
 
   if(!vulkan.pipelineCache.empty()) {
@@ -281,6 +337,74 @@ Vulkan::Implementation::~Implementation() {
     }
   }
   if(processor) delete processor;
+}
+
+// === libretro Vulkan HW_RENDER negotiation ============================
+// Implemented as bare-pointer helpers (opaque outContext) so we don't
+// have to pull libretro_vulkan.h into ares core headers.
+
+auto Vulkan::createDeviceFromInstance(
+    void* outContext,
+    VkInstance instance, VkPhysicalDevice gpu, VkSurfaceKHR surface,
+    PFN_vkGetInstanceProcAddr proc_addr,
+    const char** required_device_extensions, unsigned num_required_device_extensions,
+    const VkPhysicalDeviceFeatures* required_features) -> bool {
+  if(!::Vulkan::Context::init_loader(proc_addr)) return false;
+
+  // Create the Context once; it will be reused by Implementation, so the
+  // same VkDevice is shared with the frontend (no second logical device).
+  g_externalContext = std::make_unique<::Vulkan::Context>();
+  if(!g_externalContext->init_device_from_instance(
+       instance, gpu, surface,
+       required_device_extensions, num_required_device_extensions,
+       required_features, 0)) {
+    g_externalContext.reset();
+    return false;
+  }
+
+  useExternalContext       = true;
+  externalInstance         = g_externalContext->get_instance();
+  externalGpu              = g_externalContext->get_gpu();
+  externalDevice           = g_externalContext->get_device();
+  externalQueue            = g_externalContext->get_queue_info().queues[::Vulkan::QUEUE_INDEX_GRAPHICS];
+  externalQueueFamily      = g_externalContext->get_queue_info().family_indices[::Vulkan::QUEUE_INDEX_GRAPHICS];
+  externalProcAddr         = proc_addr;
+
+  // The frontend owns the underlying instance; paraLLEl-RDP's Context only
+  // wraps it. We keep ownership of the device since paraLLEl-RDP created it.
+  g_externalContext->release_instance();
+
+  // Populate retro_vulkan_context (libretro_vulkan.h layout).
+  struct { VkPhysicalDevice gpu; VkDevice device; VkQueue queue; uint32_t qfi;
+           VkQueue pqueue; uint32_t pqfi; }* ctx = (decltype(ctx))outContext;
+  ctx->gpu     = externalGpu;
+  ctx->device  = externalDevice;
+  ctx->queue   = externalQueue;
+  ctx->qfi     = externalQueueFamily;
+  ctx->pqueue  = externalQueue;
+  ctx->pqfi    = externalQueueFamily;
+
+  return true;
+}
+
+auto Vulkan::destroyExternalDevice() -> void {
+  // paraLLEl-RDP's Context owns the device; releasing the unique_ptr frees it.
+  g_externalContext.reset();
+  useExternalContext       = false;
+  externalInstance         = VK_NULL_HANDLE;
+  externalGpu              = VK_NULL_HANDLE;
+  externalDevice           = VK_NULL_HANDLE;
+  externalQueue            = VK_NULL_HANDLE;
+  externalQueueFamily      = 0;
+  externalProcAddr         = nullptr;
+  hwRenderActive           = false;
+}
+
+auto Vulkan::setHwRenderInterface(const void* iface) -> void {
+  // The interface pointer is consumed by the libretro wrapper; we just
+  // track whether HW_RENDER is live so scanoutAsync knows which path to
+  // take.
+  hwRenderActive = (iface != nullptr);
 }
 
 }

@@ -1261,7 +1261,7 @@ struct CPU : Thread {
     // Emit-time accumulator: target vaddr + sljit_jump* for outbound edges of the block being compiled.
     struct PendingEmitOutbound { u64 targetVaddr; sljit_jump* jump; };
     std::vector<PendingEmitOutbound> emitOutbound;
-    bool chainingEnabled = true;
+    bool chainingEnabled = false;
 
     auto ensureDispatcherStub() -> void;
     auto linkOutbound(Block* src) -> void;

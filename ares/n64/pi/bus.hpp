@@ -92,7 +92,13 @@ inline auto PI::busWrite(u32 address, u32 data) -> void {
   }
   if(address <= 0x07ff'ffff) return;
   if(address <= 0x0fff'ffff) {
-    if(cartridge.ram  ) return cartridge.ram.write<Size>(address, data);
+    // SRAM has no command layer — every write mutates save state, so mark
+    // dirty here. Flash is command-driven (writeByte/Half/Word may be a
+    // status query, read setup, or erase/program command) and gets its
+    // dirty mark inside the actual byte-mutation path in flash.cpp's
+    // execute(0xd2) handler — marking here would keep the cooldown reset
+    // by benign status polls and the callback would never fire.
+    if(cartridge.ram  ) { cartridge.markSaveDirty(); return cartridge.ram.write<Size>(address, data); }
     if(cartridge.flash) return cartridge.flash.write<Size>(address, data);
     return;
   }

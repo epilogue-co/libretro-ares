@@ -4,8 +4,15 @@
 #include "program.hpp"
 #include "libretro_core_options.h"
 
+// paraLLEl-RDP wraps Vulkan via volk + vulkan_headers.hpp; that header
+// must come first so vulkan_core.h sees VK_NO_PROTOTYPES via volk before
+// any other include resolves it.
 #include <n64/n64.hpp>
 
+#define VK_NO_PROTOTYPES
+#include "libretro_vulkan.h"
+
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -15,12 +22,93 @@
 
 retro_environment_t  environ_cb         = nullptr;
 retro_video_refresh_t video_cb          = nullptr;
+// Vulkan HW_RENDER state (libretro_vulkan.h protocol). When the frontend
+// supports Vulkan HW_RENDER, we hand off the rendered VkImage directly to
+// it instead of doing a GPU->CPU readback.
+retro_hw_render_callback hw_render_cb = {};
+const retro_hw_render_interface_vulkan* vulkan_iface = nullptr;
+bool hw_render_requested = false;
 retro_audio_sample_t  audio_sample_cb   = nullptr;
 retro_audio_sample_batch_t audio_batch_cb = nullptr;
 retro_input_poll_t   input_poll_cb      = nullptr;
 retro_input_state_t  input_state_cb     = nullptr;
 retro_log_printf_t   log_cb             = nullptr;
 retro_set_rumble_state_t rumble_cb      = nullptr;
+
+// libretro experimental extension: save-updated callback. The frontend
+// registers a function we call once per save event (after a quiescent
+// cooldown — see save_check_dirty_edge below). ares' bundled libretro.h
+// doesn't define this yet, so we declare it locally — same approach
+// mgba's libretro core uses.
+#ifndef RETRO_ENVIRONMENT_SET_SAVE_UPDATED_CALLBACK
+#define RETRO_ENVIRONMENT_SET_SAVE_UPDATED_CALLBACK (880 | RETRO_ENVIRONMENT_EXPERIMENTAL)
+typedef void (RETRO_CALLCONV *retro_save_updated_callback_t)(void* context);
+struct retro_save_updated_callback {
+  retro_save_updated_callback_t callback;
+};
+#endif
+static retro_save_updated_callback_t save_updated_cb = nullptr;
+// Cooldown in emulated frames between the last save-memory write and
+// the moment we fire save_updated_cb. mgba uses 15 frames (~250 ms at
+// 60 Hz) — long enough to coalesce a burst of writes from one in-game
+// save event into a single callback, short enough to be responsive.
+static constexpr u32 save_dirty_cooldown_frames = 15;
+static u32 save_frame_counter = 0;
+
+// Refresh-rate auto-detect state. The ROM region byte is unreliable on
+// hybrid discs (e.g. OoT GameCube Collector's Edition ships with a PAL
+// header but programs the VI for NTSC line counts, so our 50fps timer
+// drives a 60Hz emulated VI and the game runs at 50/60 = 83% speed).
+// We measure the actual VI vblank rate from the live registers each
+// frame and, after a stability window, push the correct fps to the
+// frontend via SET_SYSTEM_AV_INFO.
+static double refreshRateLast = 0.0;
+static u32 refreshRateStable = 0;
+static constexpr u32 refreshRateStableThreshold = 30; // ~0.5s at 60fps
+static constexpr double refreshRateUpdateEpsilon = 0.5;
+
+static double measureViRefreshRate() {
+  if(!program.loaded) return 0.0;
+  auto& vi = ares::Nintendo64::vi;
+  u64 vfreq = ares::Nintendo64::system.videoFrequency();
+  u64 lpf = (u64)vi.io.halfLinesPerField + 1;
+  u64 qld = (u64)vi.io.quarterLineDuration + 1;
+  if(vfreq == 0 || lpf <= 1 || qld == 0) return 0.0;
+  // Per VI::main: vblank fires every (halfLinesPerField+1)/2 iterations
+  // (vcounter increments once per iter, halfline = vcounter*2 + field
+  // and the threshold is halfLinesPerField+1). Each iter steps the VI
+  // clock by quarterLineDuration+1 pixel clocks.
+  return 2.0 * (double)vfreq / ((double)lpf * (double)qld);
+}
+
+static void updateRefreshRateIfChanged() {
+  double measured = measureViRefreshRate();
+  if(measured < 30.0 || measured > 70.0) {
+    refreshRateStable = 0;
+    return;
+  }
+  if(std::abs(measured - refreshRateLast) > refreshRateUpdateEpsilon) {
+    refreshRateLast = measured;
+    refreshRateStable = 0;
+    return;
+  }
+  if(refreshRateStable < refreshRateStableThreshold) {
+    ++refreshRateStable;
+    return;
+  }
+  if(refreshRateStable == refreshRateStableThreshold) {
+    ++refreshRateStable;
+    if(std::abs(measured - program.refreshRate) > refreshRateUpdateEpsilon) {
+      program.refreshRate = measured;
+      retro_system_av_info av = {};
+      retro_get_system_av_info(&av);
+      if(environ_cb) environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
+      if(log_cb) log_cb(RETRO_LOG_INFO,
+        "ares: VI refresh rate updated to %.3f Hz (was %.3f Hz)\n",
+        measured, program.refreshRate);
+    }
+  }
+}
 
 namespace {
   void fallback_log(retro_log_level, const char* fmt, ...) {
@@ -66,6 +154,81 @@ namespace {
     std::fwrite(blob.data(), 1, blob.size(), fp);
     std::fclose(fp);
   }
+
+  // === Vulkan HW_RENDER negotiation =====================================
+  // libretro_vulkan.h protocol v2. When the frontend supports Vulkan
+  // HW_RENDER, we hand paraLLEl-RDP an external instance + device and skip
+  // the GPU->CPU readback.
+
+  VkApplicationInfo vk_app_info = {
+    VK_STRUCTURE_TYPE_APPLICATION_INFO,
+    nullptr,
+    "ares-libretro", 0,
+    "ares-libretro", 0,
+    VK_API_VERSION_1_1,
+  };
+
+  const VkApplicationInfo* hw_get_application_info(void) {
+    return &vk_app_info;
+  }
+
+  // v1 negotiation: frontend asks core to pick a physical device and create
+  // a VkDevice. Defer to paraLLEl-RDP's init_device_from_instance helper,
+  // which knows what extensions/features it needs.
+  bool hw_create_device(
+      struct retro_vulkan_context* context,
+      VkInstance instance,
+      VkPhysicalDevice gpu,
+      VkSurfaceKHR surface,
+      PFN_vkGetInstanceProcAddr get_instance_proc_addr,
+      const char** required_device_extensions,
+      unsigned num_required_device_extensions,
+      const char** required_device_layers,
+      unsigned num_required_device_layers,
+      const VkPhysicalDeviceFeatures* required_features) {
+    return ares::Nintendo64::vulkan.createDeviceFromInstance(
+      context, instance, gpu, surface, get_instance_proc_addr,
+      required_device_extensions, num_required_device_extensions,
+      required_features);
+  }
+
+  void hw_destroy_device(void) {
+    ares::Nintendo64::vulkan.destroyExternalDevice();
+  }
+
+  retro_hw_render_context_negotiation_interface_vulkan vk_negotiation = {
+    RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN,
+    RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN_VERSION,
+    hw_get_application_info,
+    hw_create_device,
+    hw_destroy_device,
+    nullptr,  // v2 create_instance — not needed for paraLLEl-RDP
+    nullptr,  // v2 create_device2 — not needed
+  };
+
+  void hw_context_reset(void) {
+    // Frontend has created the Vulkan context. Fetch the live interface so
+    // we can call set_image() per frame.
+    const retro_hw_render_interface* base_iface = nullptr;
+    if(!environ_cb || !environ_cb(RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE, &base_iface) || !base_iface) {
+      if(log_cb) log_cb(RETRO_LOG_ERROR, "ares: GET_HW_RENDER_INTERFACE failed; falling back to CPU readback\n");
+      vulkan_iface = nullptr;
+      return;
+    }
+    if(base_iface->interface_type != RETRO_HW_RENDER_INTERFACE_VULKAN) {
+      if(log_cb) log_cb(RETRO_LOG_ERROR, "ares: HW interface type mismatch; expected Vulkan\n");
+      vulkan_iface = nullptr;
+      return;
+    }
+    vulkan_iface = (const retro_hw_render_interface_vulkan*)base_iface;
+    ares::Nintendo64::vulkan.setHwRenderInterface(vulkan_iface);
+    if(log_cb) log_cb(RETRO_LOG_INFO, "ares: Vulkan HW_RENDER active; zero-copy frame handoff enabled\n");
+  }
+
+  void hw_context_destroy(void) {
+    ares::Nintendo64::vulkan.setHwRenderInterface(nullptr);
+    vulkan_iface = nullptr;
+  }
 }
 
 RETRO_API void retro_set_environment(retro_environment_t cb) {
@@ -100,13 +263,13 @@ RETRO_API void retro_set_environment(retro_environment_t cb) {
     {p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT,  "D-Pad Right"},                          \
     {p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,      "A"},                                    \
     {p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,      "B"},                                    \
-    {p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,      "Z"},                                    \
+    {p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2,     "Z"},                                    \
     {p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,  "Start"},                                \
     {p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L,      "L"},                                    \
     {p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,      "R"},                                    \
     {p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,      "C-Up"},                                 \
     {p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT, "C-Down"},                               \
-    {p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2,     "C-Left"},                               \
+    {p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,      "C-Left"},                               \
     {p, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2,     "C-Right"},                              \
     {p, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT,  RETRO_DEVICE_ID_ANALOG_X, "Analog Stick X"}, \
     {p, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT,  RETRO_DEVICE_ID_ANALOG_Y, "Analog Stick Y"}, \
@@ -120,6 +283,13 @@ RETRO_API void retro_set_environment(retro_environment_t cb) {
     {0, 0, 0, 0, nullptr},
   };
   cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, (void*)descriptors);
+
+  // Save-updated callback: frontend fills in cb->callback; we invoke it
+  // from retro_run when the save dirty bit clears (mgba-style cooldown).
+  retro_save_updated_callback save_cb_struct = {};
+  if(cb(RETRO_ENVIRONMENT_SET_SAVE_UPDATED_CALLBACK, &save_cb_struct)) {
+    save_updated_cb = save_cb_struct.callback;
+  }
 }
 
 RETRO_API void retro_set_video_refresh(retro_video_refresh_t cb)        { video_cb = cb; }
@@ -197,6 +367,32 @@ RETRO_API void retro_reset(void) {
 RETRO_API void retro_run(void) {
   if(program.shutdownRequested) return;
   program.runFrame();
+
+  updateRefreshRateIfChanged();
+
+  // Save-dirty falling-edge detection (mgba pattern).
+  // Cartridge::markSaveDirty() OR's in DirtyNew on every save-memory
+  // mutation. Here we snapshot the dirty state, run the state machine,
+  // and fire save_updated_cb on the falling edge:
+  //   DirtyNew -> stamp frame, promote to DirtySeen.
+  //   DirtySeen aged > N frames -> clear, fires callback once.
+  if(save_updated_cb && program.loaded) {
+    auto& cart = ares::Nintendo64::cartridge;
+    ++save_frame_counter;
+    u32 wasDirty = cart.saveDirtyState;
+    if(cart.saveDirtyState & ares::Nintendo64::Cartridge::DirtyNew) {
+      cart.saveDirtyState &= ~ares::Nintendo64::Cartridge::DirtyNew;
+      cart.saveDirtyState |= ares::Nintendo64::Cartridge::DirtySeen;
+      cart.saveLastDirtyFrame = save_frame_counter;
+    } else if(cart.saveDirtyState & ares::Nintendo64::Cartridge::DirtySeen) {
+      if(save_frame_counter - cart.saveLastDirtyFrame > save_dirty_cooldown_frames) {
+        cart.saveDirtyState = 0;
+      }
+    }
+    if(wasDirty && cart.saveDirtyState == 0) {
+      save_updated_cb(nullptr);
+    }
+  }
 }
 
 RETRO_API size_t retro_serialize_size(void) {
@@ -222,6 +418,36 @@ RETRO_API void retro_cheat_set(unsigned, bool enabled, const char* code) {
 
 RETRO_API bool retro_load_game(const retro_game_info* game) {
   if(!game || !game->path) return false;
+
+  // Attempt Vulkan HW_RENDER before loading the game. If the frontend
+  // accepts, paraLLEl-RDP will be initialized later via context_reset
+  // with the frontend's instance/device, and we'll skip CPU readback.
+  hw_render_cb = {};
+  hw_render_cb.context_type    = RETRO_HW_CONTEXT_VULKAN;
+  hw_render_cb.version_major   = VK_API_VERSION_MAJOR(VK_API_VERSION_1_1);
+  hw_render_cb.version_minor   = VK_API_VERSION_MINOR(VK_API_VERSION_1_1);
+  hw_render_cb.context_reset   = hw_context_reset;
+  hw_render_cb.context_destroy = hw_context_destroy;
+  hw_render_cb.cache_context   = true;
+  hw_render_requested = environ_cb && environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render_cb);
+  // Defensive: some frontends accept SET_HW_RENDER but then overwrite the
+  // requested context_type to OpenGL. Only proceed with Vulkan negotiation
+  // if the frontend left our requested type intact.
+  if(hw_render_requested && hw_render_cb.context_type != RETRO_HW_CONTEXT_VULKAN) {
+    if(log_cb) log_cb(RETRO_LOG_WARN,
+      "ares: frontend accepted SET_HW_RENDER but switched context_type to %u; "
+      "skipping Vulkan negotiation and falling back to CPU video output\n",
+      (unsigned)hw_render_cb.context_type);
+    hw_render_requested = false;
+  }
+  if(hw_render_requested) {
+    environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE,
+               (void*)&vk_negotiation);
+    if(log_cb) log_cb(RETRO_LOG_INFO, "ares: Vulkan HW_RENDER negotiated with frontend\n");
+  } else {
+    if(log_cb) log_cb(RETRO_LOG_INFO, "ares: using CPU video output (no Vulkan HW_RENDER)\n");
+  }
+
   loadPipelineCache();
   return program.load(string{game->path});
 }

@@ -5,9 +5,14 @@
 
 #include <n64/n64.hpp>
 
+#define VK_NO_PROTOTYPES
+#include "libretro_vulkan.h"
+
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+
+extern const retro_hw_render_interface_vulkan* vulkan_iface;
 
 Program program;
 SaveRegion saveRegions[5] = {};
@@ -72,6 +77,32 @@ auto Program::status(string_view message) -> void {
 
 auto Program::video(ares::Node::Video::Screen node, const u32* data, u32 pitch, u32 width, u32 height) -> void {
   if(!video_cb) return;
+  // HW_RENDER (Vulkan): hand the rendered VkImage to the frontend instead
+  // of copying back through a CPU buffer. Signaled to the frontend via the
+  // RETRO_HW_FRAME_BUFFER_VALID sentinel passed in place of `data`.
+  if(vulkan_iface && ares::Nintendo64::vulkan.hwRenderActive
+      && ares::Nintendo64::vulkan.lastImage != VK_NULL_HANDLE) {
+    retro_vulkan_image image = {};
+    image.image_view  = ares::Nintendo64::vulkan.lastImageView;
+    image.image_layout = ares::Nintendo64::vulkan.lastImageLayout;
+    image.create_info.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    image.create_info.image    = ares::Nintendo64::vulkan.lastImage;
+    image.create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    image.create_info.format   = ares::Nintendo64::vulkan.lastImageFormat;
+    image.create_info.components = {
+      VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G,
+      VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A
+    };
+    image.create_info.subresourceRange = {
+      VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1
+    };
+    vulkan_iface->set_image(vulkan_iface->handle, &image, 0, nullptr,
+                            VK_QUEUE_FAMILY_IGNORED);
+    video_cb(RETRO_HW_FRAME_BUFFER_VALID,
+             ares::Nintendo64::vulkan.lastImageWidth,
+             ares::Nintendo64::vulkan.lastImageHeight, 0);
+    return;
+  }
   video_cb(data, width, height, pitch);
 }
 
@@ -143,9 +174,7 @@ auto Program::applyCheat(const char* code) -> void {
 
 auto Program::flushAudio() -> void {
   if(audioBatch.empty()) return;
-  if(audio_batch_cb) {
-    audio_batch_cb(audioBatch.data(), audioBatch.size() / 2);
-  }
+  if(audio_batch_cb) audio_batch_cb(audioBatch.data(), audioBatch.size() / 2);
   audioBatch.clear();
 }
 
@@ -161,7 +190,7 @@ auto Program::input(ares::Node::Input::Input node) -> void {
     bool value = false;
     if(name == "A")        value = s.buttons[RETRO_DEVICE_ID_JOYPAD_A];
     else if(name == "B")   value = s.buttons[RETRO_DEVICE_ID_JOYPAD_B];
-    else if(name == "Z")   value = s.buttons[RETRO_DEVICE_ID_JOYPAD_Y];
+    else if(name == "Z")   value = s.buttons[RETRO_DEVICE_ID_JOYPAD_L2];
     else if(name == "Start") value = s.buttons[RETRO_DEVICE_ID_JOYPAD_START];
     else if(name == "L")   value = s.buttons[RETRO_DEVICE_ID_JOYPAD_L];
     else if(name == "R")   value = s.buttons[RETRO_DEVICE_ID_JOYPAD_R];
@@ -171,7 +200,7 @@ auto Program::input(ares::Node::Input::Input node) -> void {
     else if(name == "Right") value = s.buttons[RETRO_DEVICE_ID_JOYPAD_RIGHT];
     else if(name == "C-Up")    value = s.analogCY < -16000 || s.buttons[RETRO_DEVICE_ID_JOYPAD_X];
     else if(name == "C-Down")  value = s.analogCY > +16000 || s.buttons[RETRO_DEVICE_ID_JOYPAD_SELECT];
-    else if(name == "C-Left")  value = s.analogCX < -16000 || s.buttons[RETRO_DEVICE_ID_JOYPAD_L2];
+    else if(name == "C-Left")  value = s.analogCX < -16000 || s.buttons[RETRO_DEVICE_ID_JOYPAD_Y];
     else if(name == "C-Right") value = s.analogCX > +16000 || s.buttons[RETRO_DEVICE_ID_JOYPAD_R2];
     button->setValue(value);
     return;

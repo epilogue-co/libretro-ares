@@ -35,9 +35,18 @@ auto CPU::unload() -> void {
 }
 
 auto CPU::main() -> void {
+#if defined(NDEBUG)
+  // Release builds skip per-iteration GDB::server.reportPC — it's a function
+  // call that nearly always returns true (no client) but still costs a call +
+  // load + branch per loop iteration. Halting via GDB requires a debug build.
+  while(!vi.refreshed) {
+    if(instruction()) synchronize();
+  }
+#else
   while(!vi.refreshed && GDB::server.reportPC(ipu.pc & 0xFFFFFFFF)) {
     if(instruction()) synchronize();
   }
+#endif
 
   vi.refreshed = false;
   queue.remove(Queue::GDB_Poll);

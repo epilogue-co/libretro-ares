@@ -39,6 +39,7 @@ auto Cartridge::joybusComm(n8 send, n8 recv, n8 input[], n8 output[]) -> n2 {
       for(u32 index : range(send - 2)) {
         cartridge.eeprom.write<Byte>(address++, input[2 + index]);
       }
+      cartridge.markSaveDirty();
       eepromBusy = 1;
       cpu.queueInsert(Queue::EEPROM_Write, 187'500 * 6); //6ms
     }
@@ -67,6 +68,7 @@ auto Cartridge::joybusComm(n8 send, n8 recv, n8 input[], n8 output[]) -> n2 {
   if(input[0] == 0x08 && send >= 10 && recv >= 1) {
     if(cartridge.rtc.present) {
       rtc.write(input[1], &input[2]);
+      cartridge.markSaveDirty();
       output[0] = rtc.status;
       valid = 1;
     }
