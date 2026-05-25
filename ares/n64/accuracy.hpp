@@ -10,7 +10,7 @@ struct Accuracy {
     static constexpr s64 JitInterleaving = 2048 * 4;
 
     //exceptions when the CPU accesses unaligned memory addresses
-    static constexpr bool AddressErrors = 0 | Reference;
+    static constexpr bool AddressErrors = 1 | Reference;
   };
 
   struct RSP {
