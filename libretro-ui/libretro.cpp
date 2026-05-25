@@ -405,7 +405,13 @@ RETRO_API bool retro_serialize(void* data, size_t size) {
 }
 
 RETRO_API bool retro_unserialize(const void* data, size_t size) {
-  return program.unserialize(data, size);
+  bool ok = program.unserialize(data, size);
+  if(ok && program.loaded) {
+    // State load replaces in-memory save bytes; flag dirty so the next
+    // quiescent window flushes them to disk via save_updated_cb.
+    ares::Nintendo64::cartridge.markSaveDirty();
+  }
+  return ok;
 }
 
 RETRO_API void retro_cheat_reset(void) {
