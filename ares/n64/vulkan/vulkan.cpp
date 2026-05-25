@@ -368,9 +368,14 @@ auto Vulkan::createDeviceFromInstance(
   externalQueueFamily      = g_externalContext->get_queue_info().family_indices[::Vulkan::QUEUE_INDEX_GRAPHICS];
   externalProcAddr         = proc_addr;
 
-  // The frontend owns the underlying instance; paraLLEl-RDP's Context only
-  // wraps it. We keep ownership of the device since paraLLEl-RDP created it.
+  // Per libretro_vulkan.h contract: the frontend owns BOTH the instance
+  // (it created it before negotiation) AND the device (the spec at
+  // retro_vulkan_destroy_device_t says destroy_device is called BEFORE
+  // vkDestroyDevice, meaning the frontend does the final destroy). Release
+  // ownership in paraLLEl-RDP's Context so its destructor will NOT call
+  // vkDestroyDevice. Matches beetle-psx-hw and parallel-n64.
   g_externalContext->release_instance();
+  g_externalContext->release_device();
 
   // Populate retro_vulkan_context (libretro_vulkan.h layout).
   struct { VkPhysicalDevice gpu; VkDevice device; VkQueue queue; uint32_t qfi;
@@ -386,7 +391,17 @@ auto Vulkan::createDeviceFromInstance(
 }
 
 auto Vulkan::destroyExternalDevice() -> void {
-  // paraLLEl-RDP's Context owns the device; releasing the unique_ptr frees it.
+  // libretro contract: this callback fires while the frontend's VkDevice is
+  // still alive (frontend calls vkDestroyDevice AFTER us). Tear down all
+  // device-bound core state in reverse construction order so paraLLEl-RDP's
+  // Device/CommandProcessor/frame contexts release their resources against
+  // a live device. The Context destructor will then run with release_device
+  // already called (see createDeviceFromInstance) so it WON'T call
+  // vkDestroyDevice — the frontend will.
+  if(implementation) {
+    delete implementation;
+    implementation = nullptr;
+  }
   g_externalContext.reset();
   useExternalContext       = false;
   externalInstance         = VK_NULL_HANDLE;
