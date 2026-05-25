@@ -75,6 +75,22 @@ auto Program::status(string_view message) -> void {
   if(log_cb) log_cb(RETRO_LOG_INFO, "%.*s\n", (int)message.size(), message.data());
 }
 
+// Per-sync-index ring of retro_vulkan_image descriptors. The frontend stores
+// a raw pointer to the struct we hand to set_image and re-reads it on duped
+// frames (RetroArch gfx/drivers/vulkan.c:vk->hw.image), so a stack-local
+// struct UAFs the moment Program::video returns. Sized to the sync mask and
+// indexed by get_sync_index — pattern used by beetle-psx-hw and parallel-n64.
+static std::vector<retro_vulkan_image> vulkanFrameRing;
+
+static void ensureVulkanFrameRing() {
+  if(!vulkan_iface) return;
+  uint32_t mask = vulkan_iface->get_sync_index_mask(vulkan_iface->handle);
+  uint32_t n = 0;
+  for(uint32_t i = 0; i < 32; i++) if(mask & (1u << i)) n = i + 1;
+  if(n == 0) n = 1;
+  if(vulkanFrameRing.size() < n) vulkanFrameRing.resize(n);
+}
+
 auto Program::video(ares::Node::Video::Screen node, const u32* data, u32 pitch, u32 width, u32 height) -> void {
   if(!video_cb) return;
   // HW_RENDER (Vulkan): hand the rendered VkImage to the frontend instead
@@ -82,7 +98,11 @@ auto Program::video(ares::Node::Video::Screen node, const u32* data, u32 pitch, 
   // RETRO_HW_FRAME_BUFFER_VALID sentinel passed in place of `data`.
   if(vulkan_iface && ares::Nintendo64::vulkan.hwRenderActive
       && ares::Nintendo64::vulkan.lastImage != VK_NULL_HANDLE) {
-    retro_vulkan_image image = {};
+    ensureVulkanFrameRing();
+    uint32_t idx = vulkan_iface->get_sync_index(vulkan_iface->handle);
+    if(idx >= vulkanFrameRing.size()) idx = idx % vulkanFrameRing.size();
+    auto& image = vulkanFrameRing[idx];
+    image = {};
     image.image_view  = ares::Nintendo64::vulkan.lastImageView;
     image.image_layout = ares::Nintendo64::vulkan.lastImageLayout;
     image.create_info.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
