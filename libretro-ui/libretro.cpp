@@ -464,6 +464,18 @@ RETRO_API bool retro_load_game_special(unsigned, const retro_game_info*, size_t)
 }
 
 RETRO_API void retro_unload_game(void) {
+  // Flush any pending save-dirty state before tearing down. If the player
+  // saves in-game and exits within the cooldown window (15 emulated
+  // frames), retro_run's falling-edge detector never fires and the
+  // frontend's disk-side mirror stays stale. Force the callback once if
+  // we have unflushed dirty bits.
+  if(save_updated_cb && program.loaded) {
+    auto& cart = ares::Nintendo64::cartridge;
+    if(cart.saveDirtyState != 0) {
+      cart.saveDirtyState = 0;
+      save_updated_cb(nullptr);
+    }
+  }
   program.unload();
   savePipelineCache();
 }

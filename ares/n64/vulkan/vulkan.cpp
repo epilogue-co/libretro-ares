@@ -288,8 +288,16 @@ Vulkan::Implementation::Implementation(u8* data, u32 size) {
   //  - External (HW_RENDER): g_externalContext was set up during libretro
   //    negotiation. Reuse it — DO NOT create a second device.
   //  - Internal (fallback): create our own instance + device as before.
+  // If the caller flagged useExternalContext but g_externalContext was
+  // never populated (or torn down), fail explicitly rather than silently
+  // initialize an internal device on top — the frontend believes HW_RENDER
+  // is live and our images on the internal device would be invisible to it.
   ::Vulkan::Context* activeContext = nullptr;
-  if(vulkan.useExternalContext && g_externalContext) {
+  if(vulkan.useExternalContext) {
+    if(!g_externalContext) {
+      crash_error = "HW_RENDER requested but external Vulkan context is missing";
+      return;
+    }
     activeContext = g_externalContext;
   } else {
     if(!::Vulkan::Context::init_loader(nullptr)) return;
@@ -351,9 +359,14 @@ auto Vulkan::createDeviceFromInstance(
     const VkPhysicalDeviceFeatures* required_features) -> bool {
   if(!::Vulkan::Context::init_loader(proc_addr)) return false;
 
-  // Create the Context once; it will be reused by Implementation, so the
-  // same VkDevice is shared with the frontend (no second logical device).
-  if(g_externalContext) { delete g_externalContext; g_externalContext = nullptr; }
+  // Per the libretro Vulkan v1/v2 negotiation contract, the frontend pairs
+  // every create_device with a destroy_device. A second create_device
+  // without an intervening destroy_device implies the frontend believes
+  // the prior context is dead — but our Context wraps a still-live frontend
+  // VkDevice. Refuse the duplicate rather than `delete g_externalContext`,
+  // whose ~Context would call vkDeviceWaitIdle on the device the frontend
+  // is still actively using.
+  if(g_externalContext) return false;
   g_externalContext = new ::Vulkan::Context;
   if(!g_externalContext->init_device_from_instance(
        instance, gpu, surface,
