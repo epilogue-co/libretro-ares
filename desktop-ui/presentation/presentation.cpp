@@ -957,6 +957,14 @@ auto Presentation::refreshSystemMenu() -> void {
 
   if(portsFound > 0) systemMenu.append(MenuSeparator());
 
+  if(ares::Node::enumerate<ares::Node::Tape>(emulator->root).size() > 0) {
+    MenuItem tapeManager{&systemMenu};
+    tapeManager.setText("Tape Manager").setIcon(Icon::Device::Tape).onActivate([&] {
+      toolsWindow.show("Tape");
+    });
+    systemMenu.append(MenuSeparator());
+  }
+
   MenuItem reset{&systemMenu};
   reset.setText("Reset").setIcon(Icon::Action::Refresh).onActivate([&] {
     Program::Guard guard;

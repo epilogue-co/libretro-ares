@@ -1,12 +1,12 @@
-#include <spec/spec.hpp>
+#include <sg/sg.hpp>
 
-namespace ares::ZXSpectrum {
+namespace ares::SG1000 {
 
 #include "deck.cpp"
 #include "tray.cpp"
 
 auto Tape::allocate(Node::Port parent) -> Node::Peripheral {
-  node = parent->append<Node::Tape>("ZX Spectrum Tape");
+  node = parent->append<Node::Tape>("SC-3000 Tape");
   node->setSupportPlay(true);
   node->setSupportRecord(false);
   node->setLoad([&] { return load(); });

@@ -15,8 +15,6 @@ struct Tape : Thread {
 
   auto main() -> void;
   auto step(uint clocks) -> void;
-
-  auto save() -> void;
   auto serialize(serializer&) -> void;
 
 private:
@@ -29,7 +27,6 @@ private:
   n1 output;
   n1 input;
   Memory::Writable<u64> data;
-
 };
 
 #include "tray.hpp"

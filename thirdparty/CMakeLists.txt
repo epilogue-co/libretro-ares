@@ -68,6 +68,7 @@ add_library(
   TZXFile/TZXBlockGroupEnd.cpp
   TZXFile/TZXBlockGroupStart.cpp
   TZXFile/TZXBlockHardwareType.cpp
+  TZXFile/TZXBlockKansasCityStandard.cpp
   TZXFile/TZXBlockLoopEnd.cpp
   TZXFile/TZXBlockLoopStart.cpp
   TZXFile/TZXBlockMessage.cpp
