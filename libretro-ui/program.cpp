@@ -5,9 +5,14 @@
 
 #include <n64/n64.hpp>
 
+#define VK_NO_PROTOTYPES
+#include "libretro_vulkan.h"
+
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+
+extern const retro_hw_render_interface_vulkan* vulkan_iface;
 
 Program program;
 SaveRegion saveRegions[5] = {};
@@ -70,8 +75,54 @@ auto Program::status(string_view message) -> void {
   if(log_cb) log_cb(RETRO_LOG_INFO, "%.*s\n", (int)message.size(), message.data());
 }
 
+// Per-sync-index ring of retro_vulkan_image descriptors. The frontend stores
+// a raw pointer to the struct we hand to set_image and re-reads it on duped
+// frames (RetroArch gfx/drivers/vulkan.c:vk->hw.image), so a stack-local
+// struct UAFs the moment Program::video returns. Sized to the sync mask and
+// indexed by get_sync_index — pattern used by beetle-psx-hw and parallel-n64.
+static std::vector<retro_vulkan_image> vulkanFrameRing;
+
+static void ensureVulkanFrameRing() {
+  if(!vulkan_iface) return;
+  uint32_t mask = vulkan_iface->get_sync_index_mask(vulkan_iface->handle);
+  uint32_t n = 0;
+  for(uint32_t i = 0; i < 32; i++) if(mask & (1u << i)) n = i + 1;
+  if(n == 0) n = 1;
+  if(vulkanFrameRing.size() < n) vulkanFrameRing.resize(n);
+}
+
 auto Program::video(ares::Node::Video::Screen node, const u32* data, u32 pitch, u32 width, u32 height) -> void {
   if(!video_cb) return;
+  // HW_RENDER (Vulkan): hand the rendered VkImage to the frontend instead
+  // of copying back through a CPU buffer. Signaled to the frontend via the
+  // RETRO_HW_FRAME_BUFFER_VALID sentinel passed in place of `data`.
+  if(vulkan_iface && ares::Nintendo64::vulkan.hwRenderActive
+      && ares::Nintendo64::vulkan.lastImage != VK_NULL_HANDLE) {
+    ensureVulkanFrameRing();
+    uint32_t idx = vulkan_iface->get_sync_index(vulkan_iface->handle);
+    if(idx >= vulkanFrameRing.size()) idx = idx % vulkanFrameRing.size();
+    auto& image = vulkanFrameRing[idx];
+    image = {};
+    image.image_view  = ares::Nintendo64::vulkan.lastImageView;
+    image.image_layout = ares::Nintendo64::vulkan.lastImageLayout;
+    image.create_info.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    image.create_info.image    = ares::Nintendo64::vulkan.lastImage;
+    image.create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    image.create_info.format   = ares::Nintendo64::vulkan.lastImageFormat;
+    image.create_info.components = {
+      VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G,
+      VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A
+    };
+    image.create_info.subresourceRange = {
+      VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1
+    };
+    vulkan_iface->set_image(vulkan_iface->handle, &image, 0, nullptr,
+                            VK_QUEUE_FAMILY_IGNORED);
+    video_cb(RETRO_HW_FRAME_BUFFER_VALID,
+             ares::Nintendo64::vulkan.lastImageWidth,
+             ares::Nintendo64::vulkan.lastImageHeight, 0);
+    return;
+  }
   video_cb(data, width, height, pitch);
 }
 
@@ -143,9 +194,7 @@ auto Program::applyCheat(const char* code) -> void {
 
 auto Program::flushAudio() -> void {
   if(audioBatch.empty()) return;
-  if(audio_batch_cb) {
-    audio_batch_cb(audioBatch.data(), audioBatch.size() / 2);
-  }
+  if(audio_batch_cb) audio_batch_cb(audioBatch.data(), audioBatch.size() / 2);
   audioBatch.clear();
 }
 
@@ -161,7 +210,7 @@ auto Program::input(ares::Node::Input::Input node) -> void {
     bool value = false;
     if(name == "A")        value = s.buttons[RETRO_DEVICE_ID_JOYPAD_A];
     else if(name == "B")   value = s.buttons[RETRO_DEVICE_ID_JOYPAD_B];
-    else if(name == "Z")   value = s.buttons[RETRO_DEVICE_ID_JOYPAD_Y];
+    else if(name == "Z")   value = s.buttons[RETRO_DEVICE_ID_JOYPAD_L2];
     else if(name == "Start") value = s.buttons[RETRO_DEVICE_ID_JOYPAD_START];
     else if(name == "L")   value = s.buttons[RETRO_DEVICE_ID_JOYPAD_L];
     else if(name == "R")   value = s.buttons[RETRO_DEVICE_ID_JOYPAD_R];
@@ -171,7 +220,7 @@ auto Program::input(ares::Node::Input::Input node) -> void {
     else if(name == "Right") value = s.buttons[RETRO_DEVICE_ID_JOYPAD_RIGHT];
     else if(name == "C-Up")    value = s.analogCY < -16000 || s.buttons[RETRO_DEVICE_ID_JOYPAD_X];
     else if(name == "C-Down")  value = s.analogCY > +16000 || s.buttons[RETRO_DEVICE_ID_JOYPAD_SELECT];
-    else if(name == "C-Left")  value = s.analogCX < -16000 || s.buttons[RETRO_DEVICE_ID_JOYPAD_L2];
+    else if(name == "C-Left")  value = s.analogCX < -16000 || s.buttons[RETRO_DEVICE_ID_JOYPAD_Y];
     else if(name == "C-Right") value = s.analogCX > +16000 || s.buttons[RETRO_DEVICE_ID_JOYPAD_R2];
     button->setValue(value);
     return;

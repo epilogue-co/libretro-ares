@@ -13,14 +13,30 @@ struct LoggingInterface : Util::LoggingInterface {
   }
 } loggingInterface;
 
+// HW_RENDER Context: created in createDeviceFromInstance, destroyed in
+// destroyExternalDevice. Deliberately a raw pointer rather than a
+// std::unique_ptr so that no static destructor runs at process exit — at
+// that point the frontend's VkDevice is already gone, and paraLLEl-RDP's
+// ~Context calls vkDeviceWaitIdle unconditionally (it gates only the
+// destroy on owned_device, not the wait). If the frontend forgets to
+// invoke destroy_device we leak the Context, which is harmless at exit.
+static ::Vulkan::Context* g_externalContext = nullptr;
+
 struct Vulkan::Implementation {
   Implementation(u8* data, u32 size);
   ~Implementation();
 
+  // Internal-mode Context. In external mode (HW_RENDER) it stays default-
+  // constructed; device.set_context() points at g_externalContext instead.
   ::Vulkan::Context context;
   ::Vulkan::Device device;
   ::RDP::CommandProcessor* processor = nullptr;
   atomic<const char*> crash_error = nullptr;
+
+  // HW_RENDER path keeps the latest scanout ImageHandle alive across the
+  // frame so the VkImage/View remain valid until the frontend has consumed
+  // them via set_image().
+  ::Vulkan::ImageHandle hwRenderScanoutImage;
 
   struct Validation : public ::RDP::ValidationInterface {
     Implementation& self;
@@ -196,6 +212,36 @@ auto Vulkan::scanoutAsync(bool field) -> bool {
   if(framePersistence) options.blend_previous_frame = true;
 
 
+  if(hwRenderActive) {
+    // Zero-copy GPU path: keep the rendered VkImage and publish it for the
+    // libretro frontend to consume via set_image(). No CPU readback, no
+    // host stall: scanout() drains the command-processing thread, signals
+    // the renderer (flush_and_signal), and submits the VI command buffer
+    // (containing the final image_barrier transitioning the returned image
+    // to SHADER_READ_ONLY_OPTIMAL) to the graphics queue before returning.
+    // The frontend submits its sampling work to the same queue, so in-queue
+    // ordering provides the read-after-write guarantee — no semaphore or
+    // host wait is required. Pattern matches mupen64plus-video-paraLLEl and
+    // beetle-psx-hw, both of which omit any wait between scanout and
+    // set_image.
+    implementation->hwRenderScanoutImage =
+      implementation->processor->scanout(options);
+    if(implementation->hwRenderScanoutImage) {
+      lastImage       = implementation->hwRenderScanoutImage->get_image();
+      lastImageView   = implementation->hwRenderScanoutImage->get_view().get_view();
+      lastImageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      lastImageFormat = implementation->hwRenderScanoutImage->get_format();
+      lastImageWidth  = implementation->hwRenderScanoutImage->get_width();
+      lastImageHeight = implementation->hwRenderScanoutImage->get_height();
+    } else {
+      lastImage = VK_NULL_HANDLE;
+      lastImageView = VK_NULL_HANDLE;
+      lastImageWidth = lastImageHeight = 0;
+    }
+    implementation->scanoutCount++;
+    return true;
+  }
+
   if(implementation->scanout.fence) {
     implementation->scanout.fence->wait();
   }
@@ -238,9 +284,27 @@ auto Vulkan::crashed() -> const char* {
 }
 
 Vulkan::Implementation::Implementation(u8* data, u32 size) {
-  if(!::Vulkan::Context::init_loader(nullptr)) return;
-  if(!context.init_instance_and_device(nullptr, 0, nullptr, 0, 0)) return;
-  device.set_context(context);
+  // Two code paths:
+  //  - External (HW_RENDER): g_externalContext was set up during libretro
+  //    negotiation. Reuse it — DO NOT create a second device.
+  //  - Internal (fallback): create our own instance + device as before.
+  // If the caller flagged useExternalContext but g_externalContext was
+  // never populated (or torn down), fail explicitly rather than silently
+  // initialize an internal device on top — the frontend believes HW_RENDER
+  // is live and our images on the internal device would be invisible to it.
+  ::Vulkan::Context* activeContext = nullptr;
+  if(vulkan.useExternalContext) {
+    if(!g_externalContext) {
+      crash_error = "HW_RENDER requested but external Vulkan context is missing";
+      return;
+    }
+    activeContext = g_externalContext;
+  } else {
+    if(!::Vulkan::Context::init_loader(nullptr)) return;
+    if(!context.init_instance_and_device(nullptr, 0, nullptr, 0, 0)) return;
+    activeContext = &context;
+  }
+  device.set_context(*activeContext);
   device.init_frame_contexts(3);
 
   if(!vulkan.pipelineCache.empty()) {
@@ -281,6 +345,99 @@ Vulkan::Implementation::~Implementation() {
     }
   }
   if(processor) delete processor;
+}
+
+// === libretro Vulkan HW_RENDER negotiation ============================
+// Implemented as bare-pointer helpers (opaque outContext) so we don't
+// have to pull libretro_vulkan.h into ares core headers.
+
+auto Vulkan::createDeviceFromInstance(
+    void* outContext,
+    VkInstance instance, VkPhysicalDevice gpu, VkSurfaceKHR surface,
+    PFN_vkGetInstanceProcAddr proc_addr,
+    const char** required_device_extensions, unsigned num_required_device_extensions,
+    const VkPhysicalDeviceFeatures* required_features) -> bool {
+  if(!::Vulkan::Context::init_loader(proc_addr)) return false;
+
+  // Per the libretro Vulkan v1/v2 negotiation contract, the frontend pairs
+  // every create_device with a destroy_device. A second create_device
+  // without an intervening destroy_device implies the frontend believes
+  // the prior context is dead — but our Context wraps a still-live frontend
+  // VkDevice. Refuse the duplicate rather than `delete g_externalContext`,
+  // whose ~Context would call vkDeviceWaitIdle on the device the frontend
+  // is still actively using.
+  if(g_externalContext) return false;
+  g_externalContext = new ::Vulkan::Context;
+  if(!g_externalContext->init_device_from_instance(
+       instance, gpu, surface,
+       required_device_extensions, num_required_device_extensions,
+       required_features, 0)) {
+    delete g_externalContext;
+    g_externalContext = nullptr;
+    return false;
+  }
+
+  useExternalContext       = true;
+  externalInstance         = g_externalContext->get_instance();
+  externalGpu              = g_externalContext->get_gpu();
+  externalDevice           = g_externalContext->get_device();
+  externalQueue            = g_externalContext->get_queue_info().queues[::Vulkan::QUEUE_INDEX_GRAPHICS];
+  externalQueueFamily      = g_externalContext->get_queue_info().family_indices[::Vulkan::QUEUE_INDEX_GRAPHICS];
+  externalProcAddr         = proc_addr;
+
+  // Per libretro_vulkan.h contract: the frontend owns BOTH the instance
+  // (it created it before negotiation) AND the device (the spec at
+  // retro_vulkan_destroy_device_t says destroy_device is called BEFORE
+  // vkDestroyDevice, meaning the frontend does the final destroy). Release
+  // ownership in paraLLEl-RDP's Context so its destructor will NOT call
+  // vkDestroyDevice. Matches beetle-psx-hw and parallel-n64.
+  g_externalContext->release_instance();
+  g_externalContext->release_device();
+
+  // Populate retro_vulkan_context (libretro_vulkan.h layout).
+  struct { VkPhysicalDevice gpu; VkDevice device; VkQueue queue; uint32_t qfi;
+           VkQueue pqueue; uint32_t pqfi; }* ctx = (decltype(ctx))outContext;
+  ctx->gpu     = externalGpu;
+  ctx->device  = externalDevice;
+  ctx->queue   = externalQueue;
+  ctx->qfi     = externalQueueFamily;
+  ctx->pqueue  = externalQueue;
+  ctx->pqfi    = externalQueueFamily;
+
+  return true;
+}
+
+auto Vulkan::destroyExternalDevice() -> void {
+  // libretro contract: this callback fires while the frontend's VkDevice is
+  // still alive (frontend calls vkDestroyDevice AFTER us). Tear down all
+  // device-bound core state in reverse construction order so paraLLEl-RDP's
+  // Device/CommandProcessor/frame contexts release their resources against
+  // a live device. The Context destructor will then run with release_device
+  // already called (see createDeviceFromInstance) so it WON'T call
+  // vkDestroyDevice — the frontend will.
+  if(implementation) {
+    delete implementation;
+    implementation = nullptr;
+  }
+  if(g_externalContext) {
+    delete g_externalContext;
+    g_externalContext = nullptr;
+  }
+  useExternalContext       = false;
+  externalInstance         = VK_NULL_HANDLE;
+  externalGpu              = VK_NULL_HANDLE;
+  externalDevice           = VK_NULL_HANDLE;
+  externalQueue            = VK_NULL_HANDLE;
+  externalQueueFamily      = 0;
+  externalProcAddr         = nullptr;
+  hwRenderActive           = false;
+}
+
+auto Vulkan::setHwRenderInterface(const void* iface) -> void {
+  // The interface pointer is consumed by the libretro wrapper; we just
+  // track whether HW_RENDER is live so scanoutAsync knows which path to
+  // take.
+  hwRenderActive = (iface != nullptr);
 }
 
 }

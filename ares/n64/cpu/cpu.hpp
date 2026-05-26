@@ -1061,22 +1061,6 @@ struct CPU : Thread {
       n64 data = 0;
     };
 
-    struct Block;
-
-    // A block has at most 2 outbound chain links (taken edge + fallthrough of a
-    // conditional branch, or single edge of an unconditional jump). Fixed array
-    // keeps Block trivially constructible so it can be bump-allocated.
-    static constexpr u32 MaxOutbound = 2;
-
-    struct OutboundLink {
-      u64 targetVaddr;
-      u64 targetStateKey;
-      sljit_uw jumpAddr;            // sljit_get_jump_addr() result
-      sljit_sw executableOffset;
-      Block* linkedTo;              // nullptr = currently patched to dispatcher stub
-      Block* nextInDest;            // intrusive list in dest->inboundHead
-    };
-
     struct Block {
       auto execute(CPU& self) -> void {
         self.recompiler.activeBlock = this;
@@ -1084,18 +1068,12 @@ struct CPU : Thread {
       }
 
       u8* code = nullptr;
-      u8* entryPoint = nullptr;      // label after ABI prologue + entry dispatcher
-      sljit_sw executableOffset = 0; // captured from sljit at endFunction()
       Block* next = nullptr;
       u64 stateKey = 0;
       u64 vaddrPage = 0;
       u32 startAddress = 0;
       u32 endAddress = 0;
       u8* sectionDirty = nullptr;
-      u32 outboundCount = 0;
-      OutboundLink outbound[MaxOutbound];
-      Block* inboundHead = nullptr;  // head of intrusive list of predecessors
-      bool invalidated = false;
     };
 
     struct Section {
@@ -1125,11 +1103,6 @@ struct CPU : Thread {
       std::ranges::fill(sections, nullptr);
       std::ranges::fill(sectionDirty, 0);
       activeBlock = nullptr;
-      // Chain state references compiled-code addresses inside the allocator;
-      // they become invalid after an allocator flush, which calls reset().
-      dispatcherStub = nullptr;
-      pendingChainLinks.clear();
-      emitOutbound.clear();
     }
 
     auto isRdramAddress(u32 address) const -> bool {
@@ -1248,26 +1221,6 @@ struct CPU : Thread {
     std::vector<SlowPath> slowPaths;
     std::vector<Section*> sections;
     std::vector<u8> sectionDirty;
-
-    // Block chaining state.
-    struct PendingChainLink {
-      u64 targetVaddr;
-      u64 targetStateKey;
-      Block* predecessor;        // who issued the jump
-      u32 outboundIndex;         // index into predecessor->outbound
-    };
-    u8* dispatcherStub = nullptr;             // tiny function that just returns
-    std::vector<PendingChainLink> pendingChainLinks;
-    // Emit-time accumulator: target vaddr + sljit_jump* for outbound edges of the block being compiled.
-    struct PendingEmitOutbound { u64 targetVaddr; sljit_jump* jump; };
-    std::vector<PendingEmitOutbound> emitOutbound;
-    bool chainingEnabled = true;
-
-    auto ensureDispatcherStub() -> void;
-    auto linkOutbound(Block* src) -> void;
-    auto linkInboundFromPending(Block* dst) -> void;
-    auto unlinkInbound(Block* dst) -> void;
-    auto patchJumpTo(OutboundLink& link, u8* target) -> void;
   } recompiler{*this};
   s64 jitClockTarget = 0;
 
