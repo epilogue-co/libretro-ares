@@ -39,6 +39,11 @@ struct Vulkan {
   uint32_t     lastImageWidth   = 0;
   uint32_t     lastImageHeight  = 0;
 
+  using QueueLockCallback = void (*)(const void*);
+  const void* queueLockHandle = nullptr;
+  QueueLockCallback queueLock = nullptr;
+  QueueLockCallback queueUnlock = nullptr;
+
   // libretro v1 negotiation helper. Picks queue family, creates the
   // device via paraLLEl-RDP's Context::init_device_from_instance, and
   // returns the bare Vulkan handles for the frontend to consume.
@@ -55,6 +60,7 @@ struct Vulkan {
   // Set / clear the live HW interface handle. Opaque pointer to avoid
   // forcing libretro_vulkan.h into ares core headers.
   auto setHwRenderInterface(const void* iface) -> void;
+  auto setQueueLockCallbacks(const void* handle, QueueLockCallback lock, QueueLockCallback unlock) -> void;
 
   struct Implementation;
   Implementation* implementation = nullptr;

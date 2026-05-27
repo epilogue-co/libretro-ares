@@ -305,6 +305,14 @@ Vulkan::Implementation::Implementation(u8* data, u32 size) {
     activeContext = &context;
   }
   device.set_context(*activeContext);
+  if(vulkan.queueLock && vulkan.queueUnlock) {
+    const void* handle = vulkan.queueLockHandle;
+    auto lock = vulkan.queueLock;
+    auto unlock = vulkan.queueUnlock;
+    device.set_queue_lock(
+      [handle, lock]() { lock(handle); },
+      [handle, unlock]() { unlock(handle); });
+  }
   device.init_frame_contexts(3);
 
   if(!vulkan.pipelineCache.empty()) {
@@ -345,6 +353,24 @@ Vulkan::Implementation::~Implementation() {
     }
   }
   if(processor) delete processor;
+}
+
+auto Vulkan::setQueueLockCallbacks(const void* handle, QueueLockCallback lock, QueueLockCallback unlock) -> void {
+  queueLockHandle = handle;
+  queueLock = lock;
+  queueUnlock = unlock;
+  if(!implementation) return;
+
+  if(queueLock && queueUnlock) {
+    const void* activeHandle = queueLockHandle;
+    auto activeLock = queueLock;
+    auto activeUnlock = queueUnlock;
+    implementation->device.set_queue_lock(
+      [activeHandle, activeLock]() { activeLock(activeHandle); },
+      [activeHandle, activeUnlock]() { activeUnlock(activeHandle); });
+  } else {
+    implementation->device.set_queue_lock({}, {});
+  }
 }
 
 // === libretro Vulkan HW_RENDER negotiation ============================
