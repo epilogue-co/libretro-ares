@@ -38,6 +38,22 @@ struct Vulkan::Implementation {
   // them via set_image().
   ::Vulkan::ImageHandle hwRenderScanoutImage;
 
+  // Per-scanout external binary semaphore (OPAQUE_FD / OPAQUE_WIN32). Held
+  // here so the wrapped Granite handle survives until set_image is done.
+  // hwRenderSignalSemPrev keeps the previous frame's handle alive until
+  // the frontend's GL thread has had a chance to import it via
+  // vkGetSemaphoreFdKHR — see RetroVulkanBridge::iface_set_image.
+  ::Vulkan::Semaphore hwRenderSignalSem;
+  ::Vulkan::Semaphore hwRenderSignalSemPrev;
+  // GL→Vk back-pressure semaphore: created once, reused every frame in
+  // binary-semaphore signal/wait cycle. Frontend signals; we wait.
+  ::Vulkan::Semaphore hwRenderGlSignalSem;
+  bool                hwRenderHasGlSignal = false;
+  // Tracks the underlying VkDeviceMemory we last exported, so we only
+  // re-publish when the underlying allocation rotates.
+  VkDeviceMemory hwRenderLastVkMemory = VK_NULL_HANDLE;
+  uint64_t       hwRenderAllocCounter = 0;
+
   struct Validation : public ::RDP::ValidationInterface {
     Implementation& self;
     Validation(Implementation& i) : self(i) {}
@@ -214,16 +230,43 @@ auto Vulkan::scanoutAsync(bool field) -> bool {
 
   if(hwRenderActive) {
     // Zero-copy GPU path: keep the rendered VkImage and publish it for the
-    // libretro frontend to consume via set_image(). No CPU readback, no
-    // host stall: scanout() drains the command-processing thread, signals
-    // the renderer (flush_and_signal), and submits the VI command buffer
-    // (containing the final image_barrier transitioning the returned image
-    // to SHADER_READ_ONLY_OPTIMAL) to the graphics queue before returning.
-    // The frontend submits its sampling work to the same queue, so in-queue
-    // ordering provides the read-after-write guarantee — no semaphore or
-    // host wait is required. Pattern matches mupen64plus-video-paraLLEl and
-    // beetle-psx-hw, both of which omit any wait between scanout and
-    // set_image.
+    // libretro frontend to consume via set_image(). On Linux/Windows we
+    // additionally request paraLLEl-RDP to allocate the scanout image
+    // with external memory + mint an exportable signal semaphore, so the
+    // frontend can import the underlying VkDeviceMemory into GL directly
+    // (no vkCmdCopyImage) and wait on the actual Vulkan completion.
+    //
+    // macOS deliberately skips both: MoltenVK doesn't expose OPAQUE_FD
+    // image creation or semaphore export the way the Khronos KHR
+    // extensions assume, so paraLLEl-RDP fails to allocate the scanout
+    // image (returns nullptr) and the frame goes black. The frontend's
+    // IOSurface bridge handles the macOS HW handoff via a vkCmdCopyImage
+    // into a CGLTexImageIOSurface2D-backed VkImage instead.
+    #if !defined(__APPLE__)
+    options.export_scanout     = true;
+    options.export_handle_type = ::Vulkan::ExternalHandle::get_opaque_memory_handle_type();
+    options.persist_frame_on_invalid_input = false;  // incompatible with export_scanout
+    implementation->hwRenderSignalSemPrev = implementation->hwRenderSignalSem;
+    implementation->hwRenderSignalSem = implementation->device.request_semaphore_external(
+      VK_SEMAPHORE_TYPE_BINARY_KHR,
+      ::Vulkan::ExternalHandle::get_opaque_semaphore_handle_type());
+    options.signal_semaphore   = implementation->hwRenderSignalSem;
+
+    // GL→Vk back-pressure. Minted lazily; reused every frame.
+    if(!implementation->hwRenderGlSignalSem) {
+      implementation->hwRenderGlSignalSem = implementation->device.request_semaphore_external(
+        VK_SEMAPHORE_TYPE_BINARY_KHR,
+        ::Vulkan::ExternalHandle::get_opaque_semaphore_handle_type());
+      if(implementation->hwRenderGlSignalSem) {
+        lastGlSignalVkSem = implementation->hwRenderGlSignalSem->get_semaphore();
+      }
+    }
+    if(implementation->hwRenderHasGlSignal && implementation->hwRenderGlSignalSem) {
+      // Skip wait on the very first scanout — no GL signal yet to wait on.
+      options.wait_semaphore = implementation->hwRenderGlSignalSem;
+    }
+    #endif
+
     implementation->hwRenderScanoutImage =
       implementation->processor->scanout(options);
     if(implementation->hwRenderScanoutImage) {
@@ -233,10 +276,47 @@ auto Vulkan::scanoutAsync(bool field) -> bool {
       lastImageFormat = implementation->hwRenderScanoutImage->get_format();
       lastImageWidth  = implementation->hwRenderScanoutImage->get_width();
       lastImageHeight = implementation->hwRenderScanoutImage->get_height();
+
+      #if !defined(__APPLE__)
+      lastSignalSemaphore = implementation->hwRenderSignalSem
+        ? implementation->hwRenderSignalSem->get_semaphore()
+        : VK_NULL_HANDLE;
+
+      // Successful scanout — from next frame, wait on the GL signal sem.
+      // (Program::video calls set_signal_semaphore with lastGlSignalVkSem
+      // so the frontend signals it after the blit of THIS frame.)
+      if(implementation->hwRenderGlSignalSem) implementation->hwRenderHasGlSignal = true;
+
+      // Detect a fresh underlying VkDeviceMemory (paraLLEl-RDP recycles
+      // scanout images, so the same backing memory typically returns).
+      // Only re-export when it changes.
+      auto& alloc = const_cast<::Vulkan::DeviceAllocation&>(
+        implementation->hwRenderScanoutImage->get_allocation());
+      VkDeviceMemory mem = alloc.get_memory();
+      if(mem != VK_NULL_HANDLE && mem != implementation->hwRenderLastVkMemory) {
+        auto handle = alloc.export_handle(implementation->device);
+        if((bool)handle) {
+          implementation->hwRenderLastVkMemory = mem;
+          implementation->hwRenderAllocCounter++;
+          lastAllocationId = implementation->hwRenderAllocCounter;
+          #ifdef _WIN32
+          lastMemoryHandle = reinterpret_cast<uintptr_t>(handle.handle);
+          #else
+          lastMemoryHandle = static_cast<uintptr_t>(static_cast<unsigned>(handle.handle));
+          #endif
+          lastMemorySize       = static_cast<uint64_t>(alloc.get_size());
+          lastMemoryHandleType = static_cast<uint32_t>(handle.memory_handle_type);
+          memoryPublishPending = true;
+        }
+      }
+      #else
+      lastSignalSemaphore = VK_NULL_HANDLE;
+      #endif
     } else {
       lastImage = VK_NULL_HANDLE;
       lastImageView = VK_NULL_HANDLE;
       lastImageWidth = lastImageHeight = 0;
+      lastSignalSemaphore = VK_NULL_HANDLE;
     }
     implementation->scanoutCount++;
     return true;

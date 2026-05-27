@@ -78,6 +78,17 @@ struct ScanoutOptions
 	// presist_frame_on_invalid_input must be false when using exports.
 	VkExternalMemoryHandleTypeFlagBits export_handle_type = {};
 	bool export_scanout = false;
+
+	// Optional external binary semaphore signaled when the scanout image
+	// is finished. Used by zero-copy frontends to wait on the Vulkan
+	// completion from GL without an intermediate vkQueueWaitIdle.
+	Vulkan::Semaphore signal_semaphore;
+
+	// Optional external binary semaphore the scanout submit will wait
+	// on before writing to the scanout image. Zero-copy frontends signal
+	// it from GL after the previous frame's blit completes so paraLLEl-RDP
+	// doesn't recycle a scanout buffer while GL is still reading it.
+	Vulkan::Semaphore wait_semaphore;
 };
 
 struct VIScanoutBuffer
