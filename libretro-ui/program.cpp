@@ -20,6 +20,23 @@
 #include <vector>
 
 extern const retro_hw_render_interface_vulkan* vulkan_iface;
+extern retro_environment_t environ_cb;
+
+// Private extension to the libretro Vulkan protocol; matches Playback's
+// frontend (src/core/libretro_vulkan.h). Cores publish their scanout
+// memory handle via this env so the frontend can skip its staging copy.
+#ifndef RETRO_ENVIRONMENT_PLAYBACK_PUBLISH_VK_EXPORTED_MEMORY
+#define RETRO_ENVIRONMENT_PLAYBACK_PUBLISH_VK_EXPORTED_MEMORY 0xF0000001
+struct retro_playback_vk_exported_memory {
+  uint64_t  allocation_id;
+  uintptr_t memory_handle;
+  uint64_t  memory_size;
+  uint32_t  handle_type;
+  uint32_t  width;
+  uint32_t  height;
+  uint32_t  format;
+};
+#endif
 
 Program program;
 SaveRegion saveRegions[5] = {};
@@ -132,8 +149,38 @@ auto Program::video(ares::Node::Video::Screen node, const u32* data, u32 pitch, 
     image.create_info.subresourceRange = {
       VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1
     };
-    vulkan_iface->set_image(vulkan_iface->handle, &image, 0, nullptr,
+    // Zero-copy publish: hand the frontend a fresh memory handle whenever
+    // paraLLEl-RDP rotated its scanout backing allocation. Consumed-once
+    // contract: the frontend's GL driver imports + closes the handle, so
+    // we clear the local copy after dispatch.
+    if(ares::Nintendo64::vulkan.memoryPublishPending && environ_cb) {
+      retro_playback_vk_exported_memory info = {};
+      info.allocation_id = ares::Nintendo64::vulkan.lastAllocationId;
+      info.memory_handle = ares::Nintendo64::vulkan.lastMemoryHandle;
+      info.memory_size   = ares::Nintendo64::vulkan.lastMemorySize;
+      info.handle_type   = ares::Nintendo64::vulkan.lastMemoryHandleType;
+      info.width         = ares::Nintendo64::vulkan.lastImageWidth;
+      info.height        = ares::Nintendo64::vulkan.lastImageHeight;
+      info.format        = (uint32_t)ares::Nintendo64::vulkan.lastImageFormat;
+      environ_cb(RETRO_ENVIRONMENT_PLAYBACK_PUBLISH_VK_EXPORTED_MEMORY, &info);
+      ares::Nintendo64::vulkan.memoryPublishPending = false;
+      ares::Nintendo64::vulkan.lastMemoryHandle     = 0;
+    }
+    VkSemaphore sigSem = ares::Nintendo64::vulkan.lastSignalSemaphore;
+    uint32_t numSems   = sigSem != VK_NULL_HANDLE ? 1u : 0u;
+    vulkan_iface->set_image(vulkan_iface->handle, &image, numSems,
+                            numSems ? &sigSem : nullptr,
                             VK_QUEUE_FAMILY_IGNORED);
+    // Register the GL→Vk back-pressure sem with the frontend. Per the
+    // libretro spec, set_signal_semaphore is called every frame; the
+    // frontend signals the sem after blit (or pure-signal pass on dupe)
+    // and our next scanout waits on it. set_signal_semaphore may be
+    // null on older frontends — staging path still works without it.
+    if(vulkan_iface->set_signal_semaphore
+       && ares::Nintendo64::vulkan.lastGlSignalVkSem != VK_NULL_HANDLE) {
+      vulkan_iface->set_signal_semaphore(vulkan_iface->handle,
+                                         ares::Nintendo64::vulkan.lastGlSignalVkSem);
+    }
     video_cb(RETRO_HW_FRAME_BUFFER_VALID,
              ares::Nintendo64::vulkan.lastImageWidth,
              ares::Nintendo64::vulkan.lastImageHeight, 0);

@@ -1419,7 +1419,26 @@ Vulkan::ImageHandle VideoInterface::scanout(VkImageLayout target_layout, const S
 		prev_scanout_image.reset();
 	}
 
-	device->submit(cmd);
+	if (options.wait_semaphore)
+	{
+		// GL→Vk wait: zero-copy frontend signaled this after the previous
+		// frame's blit completed. Wait at COLOR_ATTACHMENT_OUTPUT — that's
+		// the earliest stage the scanout submit writes the new (or
+		// recycled) scanout image.
+		device->add_wait_semaphore(Vulkan::CommandBuffer::Type::Generic,
+		                           options.wait_semaphore,
+		                           VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+		                           true);
+	}
+	if (options.signal_semaphore)
+	{
+		Vulkan::Semaphore sem = options.signal_semaphore;
+		device->submit(cmd, nullptr, 1, &sem);
+	}
+	else
+	{
+		device->submit(cmd);
+	}
 	scanout = std::move(scale_image);
 	frame_count++;
 	return scanout;

@@ -39,6 +39,20 @@ struct Vulkan {
   uint32_t     lastImageWidth   = 0;
   uint32_t     lastImageHeight  = 0;
 
+  // Zero-copy publish (paraLLEl-RDP export_scanout + frontend memory
+  // import). Captured by scanoutAsync, consumed by the libretro wrapper.
+  VkSemaphore lastSignalSemaphore  = VK_NULL_HANDLE;
+  uint64_t    lastAllocationId     = 0;
+  uintptr_t   lastMemoryHandle     = 0;
+  uint64_t    lastMemorySize       = 0;
+  uint32_t    lastMemoryHandleType = 0;
+  bool        memoryPublishPending = false;
+  // GL→Vk back-pressure semaphore: created by us, registered with the
+  // frontend via set_signal_semaphore, signaled by GL after blit, waited
+  // on by our next scanout submit. Closes the recycle-race window where
+  // paraLLEl-RDP might overwrite a scanout buffer GL is still reading.
+  VkSemaphore lastGlSignalVkSem    = VK_NULL_HANDLE;
+
   // libretro v1 negotiation helper. Picks queue family, creates the
   // device via paraLLEl-RDP's Context::init_device_from_instance, and
   // returns the bare Vulkan handles for the frontend to consume.
