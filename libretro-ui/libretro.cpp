@@ -4,11 +4,17 @@
 #include "program.hpp"
 #include "libretro_core_options.h"
 
-// paraLLEl-RDP wraps Vulkan via volk + vulkan_headers.hpp; that header
-// must come first so vulkan_core.h sees VK_NO_PROTOTYPES via volk before
-// any other include resolves it.
+// paraLLEl-RDP wraps Vulkan via volk + vulkan_headers.hpp; n64.hpp must come
+// first so vulkan_core.h sees VK_NO_PROTOTYPES via volk before any other
+// include resolves it.
 #include <n64/n64.hpp>
 
+// parallel-rdp's vulkan_headers.hpp (pulled in via n64.hpp) #defines
+// VK_USE_PLATFORM_WIN32_KHR, which makes the bundled <vulkan/vulkan.h>
+// (included by libretro_vulkan.h) drag in <windows.h>; its `boolean` then
+// clashes with nall's `boolean`. The core gets its Vulkan context from the
+// frontend and never creates a Win32 WSI surface, so suppress that include.
+#undef VK_USE_PLATFORM_WIN32_KHR
 #define VK_NO_PROTOTYPES
 #include "libretro_vulkan.h"
 
