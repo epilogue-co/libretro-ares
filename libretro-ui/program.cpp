@@ -5,6 +5,13 @@
 
 #include <n64/n64.hpp>
 
+// parallel-rdp's vulkan_headers.hpp (pulled in via n64.hpp) #defines
+// VK_USE_PLATFORM_WIN32_KHR, which makes the bundled <vulkan/vulkan.h>
+// (included by libretro_vulkan.h) drag in <windows.h>. windows.h's `boolean`
+// then clashes with nall's `boolean` (already in scope). The libretro core
+// receives its Vulkan context from the frontend and never creates a Win32 WSI
+// surface, so suppress that platform include.
+#undef VK_USE_PLATFORM_WIN32_KHR
 #define VK_NO_PROTOTYPES
 #include "libretro_vulkan.h"
 
@@ -286,7 +293,11 @@ auto Program::videoOptionsFromCore() -> void {
   ares::Nintendo64::option("Homebrew Mode", enabled("ares_n64_homebrew_mode"));
   ares::Nintendo64::vulkan.framePersistence = enabled("ares_n64_frame_persistence");
 
+#if defined(_WIN32)
+  _putenv_s("PARALLEL_RDP_UBERSHADER", getVar("ares_n64_renderer") == "specialized" ? "0" : "1");
+#else
   setenv("PARALLEL_RDP_UBERSHADER", getVar("ares_n64_renderer") == "specialized" ? "0" : "1", 1);
+#endif
 
 #if defined(VULKAN)
   ares::Nintendo64::option("Enable GPU acceleration", true);
@@ -477,7 +488,7 @@ auto Program::unload() -> void {
   streams.clear();
   loaded = false;
   shutdownRequested = false;
-  for(auto& s : portState) s = {};
+  for(auto& s : portState) s = PortState{};
   for(auto& r : saveRegions) r = {};
   saveShadow.clear();
   saveSwizzledCore = nullptr;
