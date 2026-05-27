@@ -37,6 +37,11 @@ public:
 
 bool interface_log(const char *tag, const char *fmt, ...);
 void set_thread_logging_interface(LoggingInterface *iface);
+// Process-wide fallback consulted when the calling thread has no
+// thread-local interface set. Useful for capturing logs from threads
+// spawned internally by Granite (pipeline-compile workers, etc.) that
+// the caller can't easily hook at spawn time.
+void set_process_logging_interface(LoggingInterface *iface);
 }
 
 #if defined(_WIN32)

@@ -12,6 +12,11 @@
 #define VK_NO_PROTOTYPES
 #include "libretro_vulkan.h"
 
+// paraLLEl-RDP's Util::LoggingInterface lets us redirect its LOGI/LOGW/LOGE
+// macros (Granite-style) into libretro's retro_log_callback instead of the
+// default fprintf-to-stderr fallback.
+#include "../ares/n64/vulkan/parallel-rdp/util/logging.hpp"
+
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -118,6 +123,32 @@ namespace {
     std::vfprintf(stderr, fmt, args);
     va_end(args);
   }
+
+  // Forwards paraLLEl-RDP's interface_log() calls into libretro's log_cb so
+  // the "[INFO]: Found Vulkan GPU..." and "[WARN]: Stalled compile" chunks
+  // (Granite/Util LOGI/LOGW/LOGE) get a proper [time][level][thread] frame
+  // on the frontend side instead of fprintf'ing straight to stderr.
+  // Installed via the process-wide fallback so internal pipeline-compile
+  // worker threads spawned by Granite are caught alongside the retro thread.
+  struct ParallelRdpLogForwarder : Util::LoggingInterface {
+    bool log(const char* tag, const char* fmt, va_list va) override {
+      if(!log_cb) return false;
+      char buf[2048];
+      int n = std::vsnprintf(buf, sizeof(buf), fmt, va);
+      if(n < 0) return false;
+      if(n > (int)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
+      // Drop trailing newlines — log_cb adds its own line terminator.
+      while(n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = '\0';
+      retro_log_level level = RETRO_LOG_INFO;
+      if(tag) {
+        if(std::strstr(tag, "ERROR"))     level = RETRO_LOG_ERROR;
+        else if(std::strstr(tag, "WARN")) level = RETRO_LOG_WARN;
+      }
+      log_cb(level, "[parallel-rdp] %s\n", buf);
+      return true;
+    }
+  };
+  ParallelRdpLogForwarder gParallelRdpLogger;
 
   std::string pipelineCachePath() {
     if(!environ_cb) return {};
@@ -310,6 +341,11 @@ RETRO_API void retro_init(void) {
   } else {
     log_cb = fallback_log;
   }
+
+  // Route paraLLEl-RDP's LOGI/LOGW/LOGE through libretro's logger.
+  // Process-wide install so pipeline-compile worker threads spawned
+  // internally by Granite are caught too (their thread-local is unset).
+  Util::set_process_logging_interface(&gParallelRdpLogger);
 
   enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_XRGB8888;
   if(environ_cb) environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt);
