@@ -126,7 +126,7 @@ auto Program::video(ares::Node::Video::Screen node, const u32* data, u32 pitch, 
       VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1
     };
     vulkan_iface->set_image(vulkan_iface->handle, &image, 0, nullptr,
-                            VK_QUEUE_FAMILY_IGNORED);
+                            vulkan_iface->queue_index);
     video_cb(RETRO_HW_FRAME_BUFFER_VALID,
              ares::Nintendo64::vulkan.lastImageWidth,
              ares::Nintendo64::vulkan.lastImageHeight, 0);
@@ -477,7 +477,7 @@ auto Program::unload() -> void {
   streams.clear();
   loaded = false;
   shutdownRequested = false;
-  for(auto& s : portState) s = {};
+  for(auto& s : portState) s = PortState{};
   for(auto& r : saveRegions) r = {};
   saveShadow.clear();
   saveSwizzledCore = nullptr;

@@ -238,6 +238,16 @@ namespace {
     nullptr,  // v2 create_device2 — not needed
   };
 
+  void hw_queue_lock(const void* opaque) {
+    auto* iface = (const retro_hw_render_interface_vulkan*)opaque;
+    if(iface && iface->lock_queue) iface->lock_queue(iface->handle);
+  }
+
+  void hw_queue_unlock(const void* opaque) {
+    auto* iface = (const retro_hw_render_interface_vulkan*)opaque;
+    if(iface && iface->unlock_queue) iface->unlock_queue(iface->handle);
+  }
+
   void hw_context_reset(void) {
     // Frontend has created the Vulkan context. Fetch the live interface so
     // we can call set_image() per frame.
@@ -245,22 +255,27 @@ namespace {
     if(!environ_cb || !environ_cb(RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE, &base_iface) || !base_iface) {
       if(log_cb) log_cb(RETRO_LOG_ERROR, "ares: GET_HW_RENDER_INTERFACE failed; falling back to CPU readback\n");
       vulkan_iface = nullptr;
+      ares::Nintendo64::vulkan.setQueueLockCallbacks(nullptr, nullptr, nullptr);
       return;
     }
     if(base_iface->interface_type != RETRO_HW_RENDER_INTERFACE_VULKAN) {
       if(log_cb) log_cb(RETRO_LOG_ERROR, "ares: HW interface type mismatch; expected Vulkan\n");
       vulkan_iface = nullptr;
+      ares::Nintendo64::vulkan.setQueueLockCallbacks(nullptr, nullptr, nullptr);
       return;
     }
     vulkan_iface = (const retro_hw_render_interface_vulkan*)base_iface;
     ares::Nintendo64::vulkan.setHwRenderInterface(vulkan_iface);
+    ares::Nintendo64::vulkan.setQueueLockCallbacks(vulkan_iface, hw_queue_lock, hw_queue_unlock);
     if(log_cb) log_cb(RETRO_LOG_INFO, "ares: Vulkan HW_RENDER active; zero-copy frame handoff enabled\n");
   }
 
   void hw_context_destroy(void) {
     ares::Nintendo64::vulkan.setHwRenderInterface(nullptr);
+    ares::Nintendo64::vulkan.setQueueLockCallbacks(nullptr, nullptr, nullptr);
     vulkan_iface = nullptr;
   }
+
 }
 
 RETRO_API void retro_set_environment(retro_environment_t cb) {
