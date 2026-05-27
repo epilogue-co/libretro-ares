@@ -58,6 +58,15 @@ auto Program::pak(ares::Node::Object node) -> std::shared_ptr<vfs::directory> {
   string name = node->name();
   if(name == "Nintendo 64") return systemPak ? systemPak->pak : nullptr;
   if(name == "Nintendo 64 Cartridge") return gamePak ? gamePak->pak : nullptr;
+  if(name == "Gamepad") {
+    if(auto parentNode = node->parent().lock()) {
+      string parentName = parentNode->name();
+      for(int i = 0; i < 4; i++) {
+        if(parentName == string{"Controller Port ", i + 1}) return controllerPak[i];
+      }
+    }
+    return {};
+  }
   return {};
 }
 
@@ -286,17 +295,40 @@ auto Program::videoOptionsFromCore() -> void {
 #endif
 }
 
+// Copies `size` bytes between linear and swizzled (or vice versa) cart save
+// representations by reversing the byte order within each 32-bit word — i.e.
+// dst[i] = src[i ^ 3]. Same operation in both directions since XOR-3 is
+// involutive.
+static void swizzleSaveCopy(uint8_t* dst, const uint8_t* src, size_t size) {
+  size_t words = size & ~3u;
+  for(size_t i = 0; i < words; i++) dst[i] = src[i ^ 3];
+  for(size_t i = words; i < size; i++) dst[i] = src[i];
+}
+
 auto Program::registerSaveMemory() -> void {
   for(auto& r : saveRegions) r = {};
+  saveShadow.clear();
+  saveSwizzledCore = nullptr;
   if(!root) return;
 
   auto& cart = ares::Nintendo64::cartridge;
+  uint8_t* coreBuf = nullptr;
+  size_t coreSize = 0;
   if(cart.ram.size > 0) {
-    saveRegions[0] = {cart.ram.data, cart.ram.size};
+    coreBuf = (uint8_t*)cart.ram.data;
+    coreSize = cart.ram.size;
   } else if(cart.eeprom.size > 0) {
-    saveRegions[0] = {cart.eeprom.data, cart.eeprom.size};
+    coreBuf = (uint8_t*)cart.eeprom.data;
+    coreSize = cart.eeprom.size;
   } else if(cart.flash.size > 0) {
-    saveRegions[0] = {cart.flash.data, cart.flash.size};
+    coreBuf = (uint8_t*)cart.flash.data;
+    coreSize = cart.flash.size;
+  }
+  if(coreBuf && coreSize > 0) {
+    saveShadow.resize(coreSize);
+    swizzleSaveCopy(saveShadow.data(), coreBuf, coreSize);
+    saveSwizzledCore = coreBuf;
+    saveRegions[0] = {saveShadow.data(), saveShadow.size()};
   }
   if(cart.rtc.ram.size > 0) {
     saveRegions[3] = {cart.rtc.ram.data, cart.rtc.ram.size};
@@ -353,6 +385,17 @@ auto Program::load(const string& filename) -> bool {
     err("[ares] Cartridge Slot port not found on root\n");
   }
 
+  string saveDir;
+  {
+    const char* dir = nullptr;
+    if(environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &dir) && dir) saveDir = dir;
+  }
+  //frontends commonly pass a randomly-named temp ROM path to retro_load_game;
+  //tie the controller pak filename to the SHA-256 of the ROM contents so it's
+  //stable across sessions.
+  string romHash;
+  if(auto medium = std::dynamic_pointer_cast<mia::Medium>(gamePak)) romHash = medium->sha256;
+
   for(int id = 0; id < 4; id++) {
     string portName = {"Controller Port ", id + 1};
     if(auto port = root->find<ares::Node::Port>(portName)) {
@@ -362,7 +405,27 @@ auto Program::load(const string& filename) -> bool {
 
       if(peripheral) {
         if(auto pakPort = peripheral->find<ares::Node::Port>("Pak")) {
-          if(gamePak->pak->attribute({"port", id + 1, "/rpak"}).boolean()) {
+          //cpak takes precedence over rpak when both are advertised; matches desktop-ui.
+          if(gamePak->pak->attribute({"port", id + 1, "/cpak"}).boolean()) {
+            controllerPak[id] = std::make_shared<vfs::directory>();
+            //allocate max controller pak size (62 banks); ares will resize from the file's bank header.
+            controllerPak[id]->append("save.pak", 1984_KiB);
+
+            if(saveDir && romHash) {
+              controllerPakPath[id] = {saveDir, "/", romHash, ".", id + 1, ".pak"};
+              auto persisted = nall::file::read(controllerPakPath[id]);
+              if(!persisted.empty()) {
+                if(auto fp = controllerPak[id]->write("save.pak")) {
+                  fp->resize(persisted.size());
+                  fp->write({persisted.data(), persisted.size()});
+                  fp->setAttribute("loaded", true);
+                }
+              }
+            }
+
+            pakPort->allocate("Controller Pak");
+            pakPort->connect();
+          } else if(gamePak->pak->attribute({"port", id + 1, "/rpak"}).boolean()) {
             pakPort->allocate("Rumble Pak");
             pakPort->connect();
           }
@@ -394,6 +457,21 @@ auto Program::unload() -> void {
     root->unload();
     root.reset();
   }
+  //flush controller paks to disk after root->unload() — ares Gamepad::disconnect
+  //has written RAM into our VFS save.pak by this point.
+  for(int i = 0; i < 4; i++) {
+    if(!controllerPak[i] || !controllerPakPath[i]) continue;
+    if(auto fp = controllerPak[i]->read("save.pak")) {
+      if(fp->size() > 0) {
+        nall::directory::create(nall::Location::dir(controllerPakPath[i]));
+        if(auto out = nall::file::open(controllerPakPath[i], nall::file::mode::write)) {
+          out.write({fp->data(), fp->size()});
+        }
+      }
+    }
+    controllerPak[i].reset();
+    controllerPakPath[i] = {};
+  }
   gamePak.reset();
   systemPak.reset();
   screens.clear();
@@ -402,13 +480,21 @@ auto Program::unload() -> void {
   shutdownRequested = false;
   for(auto& s : portState) s = {};
   for(auto& r : saveRegions) r = {};
+  saveShadow.clear();
+  saveSwizzledCore = nullptr;
   audioBatch.clear();
 }
 
 auto Program::runFrame() -> void {
   if(!loaded || !root) return;
   pollInputs();
+  if(saveSwizzledCore && !saveShadow.empty()) {
+    swizzleSaveCopy(saveSwizzledCore, saveShadow.data(), saveShadow.size());
+  }
   root->run();
+  if(saveSwizzledCore && !saveShadow.empty()) {
+    swizzleSaveCopy(saveShadow.data(), saveSwizzledCore, saveShadow.size());
+  }
   flushAudio();
 }
 
