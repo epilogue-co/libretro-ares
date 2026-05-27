@@ -295,14 +295,13 @@ auto Program::videoOptionsFromCore() -> void {
 #endif
 }
 
-// Copies `size` bytes between linear and swizzled (or vice versa) cart save
-// representations by reversing the byte order within each 32-bit word — i.e.
-// dst[i] = src[i ^ 3]. Same operation in both directions since XOR-3 is
-// involutive.
+// Translates between the linear cart-save view exposed via RETRO_MEMORY_SAVE_RAM
+// and ares' internal lsb::Writable layout, which stores logical byte i at
+// data[i ^ 3] (every 4-byte group is byte-reversed). The op is symmetric since
+// XOR-3 is involutive. Caller guarantees `size` is a multiple of 4 — ares'
+// allocate() at lsb/writable.hpp:18 rounds capacity down to a multiple of 8.
 static void swizzleSaveCopy(uint8_t* dst, const uint8_t* src, size_t size) {
-  size_t words = size & ~3u;
-  for(size_t i = 0; i < words; i++) dst[i] = src[i ^ 3];
-  for(size_t i = words; i < size; i++) dst[i] = src[i];
+  for(size_t i = 0; i < size; i++) dst[i] = src[i ^ 3];
 }
 
 auto Program::registerSaveMemory() -> void {

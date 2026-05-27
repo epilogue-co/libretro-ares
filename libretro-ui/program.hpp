@@ -43,11 +43,6 @@ struct Program : ares::Platform {
   nall::string controllerPakPath[4];
   ares::Node::System root;
 
-  // The N64 cart save buffers (ram/eeprom/flash) use ares' lsb Writable, which
-  // stores logical byte at index i in data[i ^ 3] — every 4-byte group is
-  // byte-reversed in memory. The libretro contract expects a linear byte view,
-  // so we expose this shadow buffer via RETRO_MEMORY_SAVE_RAM and translate
-  // each frame in runFrame().
   std::vector<uint8_t> saveShadow;
   uint8_t* saveSwizzledCore = nullptr;
   std::vector<ares::Node::Video::Screen> screens;
