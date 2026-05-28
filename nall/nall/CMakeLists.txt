@@ -1,4 +1,14 @@
-add_library(nall OBJECT main.cpp nall.cpp sljitAllocator.cpp)
+# main.cpp defines nall::main(int, char**) — the desktop entry point — which
+# calls the app-provided nall::main(Arguments). The libretro core is a shared
+# library with no app entry and never defines that overload, so linking main.cpp
+# leaves nall::main(Arguments) undefined. Unix shared objects tolerate the dead,
+# never-called reference; a Windows DLL link (ld.lld) does not. desktop-ui isn't
+# built in libretro mode, so main.cpp is simply unused here — exclude it.
+if(ARES_BUILD_LIBRETRO)
+  add_library(nall OBJECT nall.cpp sljitAllocator.cpp)
+else()
+  add_library(nall OBJECT main.cpp nall.cpp sljitAllocator.cpp)
+endif()
 add_library(ares::nall ALIAS nall)
 
 add_library(nall-headers INTERFACE)
