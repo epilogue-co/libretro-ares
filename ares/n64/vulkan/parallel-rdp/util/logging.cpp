@@ -31,7 +31,17 @@
 
 namespace Util
 {
+// Built into a shared object (ares_libretro.so). LTO marks this file-static
+// thread_local hidden and, on x86_64 ELF, downgrades it to the local-exec TLS
+// model (R_X86_64_TPOFF32) — illegal in a shared object, so ld.bfd rejects the
+// link. Force global-dynamic on ELF targets; this is a cold logging path, so
+// the __tls_get_addr indirection costs nothing measurable. (Windows PE and
+// macOS Mach-O use different TLS mechanisms and link fine, so leave them be.)
+#if defined(__ELF__)
+static thread_local LoggingInterface *logging_iface __attribute__((tls_model("global-dynamic")));
+#else
 static thread_local LoggingInterface *logging_iface;
+#endif
 static std::atomic<LoggingInterface *> process_logging_iface{nullptr};
 
 bool interface_log(const char *tag, const char *fmt, ...)
