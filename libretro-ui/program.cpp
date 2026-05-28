@@ -21,6 +21,7 @@
 
 extern const retro_hw_render_interface_vulkan* vulkan_iface;
 extern retro_environment_t environ_cb;
+extern bool hw_render_requested;
 
 // Private extension to the libretro Vulkan protocol; matches Playback's
 // frontend (src/core/libretro_vulkan.h). Cores publish their scanout
@@ -347,7 +348,10 @@ auto Program::videoOptionsFromCore() -> void {
 #endif
 
 #if defined(VULKAN)
-  ares::Nintendo64::option("Enable GPU acceleration", true);
+  // paraLLEl-RDP needs a live Vulkan HW_RENDER context. If the frontend declined
+  // SET_HW_RENDER (no Vulkan loader/device — e.g. a VM like Parallels), fall back
+  // to ares's built-in software RDP so we present CPU frames instead of nothing.
+  ares::Nintendo64::option("Enable GPU acceleration", hw_render_requested);
 #else
   ares::Nintendo64::option("Enable GPU acceleration", false);
 #endif
