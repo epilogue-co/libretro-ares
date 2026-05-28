@@ -3,6 +3,7 @@ add_library(
   SHARED
   libretro.cpp
   program.cpp
+  nall-main-stub.cpp
 )
 
 target_include_directories(
