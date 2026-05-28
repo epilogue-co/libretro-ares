@@ -29,8 +29,16 @@
 
 namespace Util
 {
+// global-dynamic TLS model: see logging.cpp — under LTO a hidden file-static
+// thread_local is downgraded to local-exec (R_X86_64_TPOFF32), illegal in an
+// ELF shared object. ELF-only so Windows/macOS keep their native TLS.
+#if defined(__ELF__)
+static thread_local char trace_tid[32] __attribute__((tls_model("global-dynamic")));
+static thread_local TimelineTraceFile *trace_file __attribute__((tls_model("global-dynamic")));
+#else
 static thread_local char trace_tid[32];
 static thread_local TimelineTraceFile *trace_file;
+#endif
 
 void TimelineTraceFile::set_tid(const char *tid)
 {

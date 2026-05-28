@@ -25,7 +25,14 @@
 
 namespace Util
 {
+// global-dynamic TLS model: see logging.cpp — under LTO a hidden file-static
+// thread_local is downgraded to local-exec (R_X86_64_TPOFF32), illegal in an
+// ELF shared object. ELF-only so Windows/macOS keep their native TLS.
+#if defined(__ELF__)
+static thread_local unsigned thread_id_to_index __attribute__((tls_model("global-dynamic"))) = ~0u;
+#else
 static thread_local unsigned thread_id_to_index = ~0u;
+#endif
 
 unsigned get_current_thread_index()
 {
