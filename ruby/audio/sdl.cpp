@@ -18,8 +18,6 @@ struct AudioSDL : AudioDriver {
 
   auto hasBlocking() -> bool override { return true; }
   auto hasDynamic() -> bool override { return true; }
-  
-  double bitsPerSample = 0;
 
   auto hasFrequencies() -> std::vector<u32> override {
     return {22050, 44100, 48000, 96000};
@@ -42,55 +40,59 @@ struct AudioSDL : AudioDriver {
     if(!ready()) return;
 
     if(self.blocking) {
-      auto bytesRemaining = SDL_GetAudioStreamAvailable(_stream);
+      auto bytesRemaining = SDL_GetAudioStreamQueued(_stream);
       while(bytesRemaining > _bufferSize) {
-        //wait for audio to drain
+        // wait for audio to drain
         auto bytesToWait = bytesRemaining - _bufferSize;
-        auto bytesPerSample = bitsPerSample / 8.0;
-        auto samplesRemaining = bytesToWait / bytesPerSample;
-        auto secondsRemaining = samplesRemaining / frequency;
-        usleep(secondsRemaining * 1000000);
-        bytesRemaining = SDL_GetAudioStreamAvailable(_stream);
+        auto framesRemaining = bytesToWait / _bytesPerFrame;
+        auto secondsRemaining = framesRemaining / (f64)frequency;
+        usleep(max(1.0, secondsRemaining * 1000000.0));
+        bytesRemaining = SDL_GetAudioStreamQueued(_stream);
       }
     }
 
-    std::unique_ptr<f32[]> output = std::make_unique<f32[]>(channels);
-    for(auto n : range(channels)) output[n] = samples[n];
-    SDL_PutAudioStreamData(_stream, &output[0], channels * sizeof(f32));
+    f32 output[2];
+    output[0] = samples[0];
+    output[1] = samples[1];
+    SDL_PutAudioStreamData(_stream, output, sizeof(output));
   }
 
   auto level() -> f64 override {
-    return SDL_GetAudioStreamAvailable(_stream) / ((f64)_bufferSize);
+    if(!ready()) return 0.0;
+    return SDL_GetAudioStreamQueued(_stream) / ((f64)_bufferSize);
   }
 
 private:
   auto initialize() -> bool {
     terminate();
-    
+
 #if defined(PLATFORM_WINDOWS)
     timeBeginPeriod(1);
 #endif
 
-    SDL_InitSubSystem(SDL_INIT_AUDIO);
+    if(!SDL_InitSubSystem(SDL_INIT_AUDIO)) return false;
 
     SDL_AudioSpec spec;
     spec.format = SDL_AUDIO_F32;
     spec.channels = 2;
     spec.freq = frequency;
-    auto desired_samples = (latency * frequency) / 1000.0f;
+
+    auto desired_samples = (latency * frequency) / 1000;
     string desired_samples_string = (string)desired_samples;
     SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, desired_samples_string);
-    
-    SDL_AudioStream *stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
-    _device = SDL_GetAudioStreamDevice(stream);
+
+    _stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
+    if(!_stream) return false;
+
+    _device = SDL_GetAudioStreamDevice(_stream);
+    if(!_device) return false;
+
     SDL_ResumeAudioDevice(_device);
-    _stream = stream;
     frequency = spec.freq;
     channels = spec.channels;
-    int bufferFrameSize;
-    SDL_GetAudioDeviceFormat(_device, &spec, &bufferFrameSize);
-    bitsPerSample = SDL_AUDIO_BITSIZE(spec.format);
-    _bufferSize = bufferFrameSize * channels * 4;
+
+    _bytesPerFrame = SDL_AUDIO_FRAMESIZE(spec);
+    _bufferSize = desired_samples * _bytesPerFrame;
 
     _ready = true;
     clear();
@@ -103,13 +105,27 @@ private:
     timeEndPeriod(1);
 #endif
     _ready = false;
-    SDL_CloseAudioDevice(_device);
-    SDL_QuitSubSystem(SDL_INIT_AUDIO);
+
+    if(_stream) {
+      SDL_DestroyAudioStream(_stream);
+      _stream = nullptr;
+    } else if(_device) {
+      SDL_CloseAudioDevice(_device);
+    }
+
+    _device = 0;
+    _bufferSize = 0;
+    _bytesPerFrame = 0;
+
+    if(SDL_WasInit(SDL_INIT_AUDIO)) {
+      SDL_QuitSubSystem(SDL_INIT_AUDIO);
+    }
   }
 
   bool _ready = false;
 
   SDL_AudioDeviceID _device = 0;
-  SDL_AudioStream *_stream;
+  SDL_AudioStream *_stream = nullptr;
   u32 _bufferSize = 0;
+  u32 _bytesPerFrame = 0;
 };
