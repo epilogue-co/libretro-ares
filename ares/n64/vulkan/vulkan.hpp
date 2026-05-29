@@ -77,6 +77,20 @@ struct Vulkan {
   bool disableVideoInterfaceProcessing = false;
   bool weaveDeinterlacing = false;
   bool framePersistence = false;
+
+  // Frame dedupe. When dedupeFrames is set, scanoutAsync fingerprints the
+  // VI register state plus the scanned RDRAM framebuffer and, on a repeat
+  // of the previous field, sets duplicateFrame and skips the GPU scanout
+  // entirely so the libretro layer emits a NULL dupe. lastFrameKey holds
+  // the previous fingerprint.
+  bool dedupeFrames      = false;
+  bool duplicateFrame    = false;
+  bool lastFrameKeyValid = false;
+  u64  lastFrameKey      = 0;
+  // Running counts for the periodic dedupe log summary (reset each report).
+  u64  dedupeSkipped     = 0;
+  u64  dedupePresented   = 0;
+  u32  dedupeReportTimer = 0;
   u32  internalUpscale = 1;  //1, 2, 4, 8
   bool supersampleScanout = false;
   u32  outputUpscale = supersampleScanout ? 1 : internalUpscale;

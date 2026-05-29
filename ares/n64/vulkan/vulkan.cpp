@@ -1,8 +1,83 @@
 #include <n64/n64.hpp>
 
+#include <cstring>
+
 namespace ares::Nintendo64 {
 
 Vulkan vulkan;
+
+// === Frame-dedupe fingerprint ==========================================
+// FNV-1a style mix; not cryptographic, but a 64-bit collision over a
+// multi-hour session is negligible and a miss only repeats one field.
+static inline auto dedupeMix(u64 h, u64 value) -> u64 {
+  h ^= value;
+  h *= 0x100000001b3ull;
+  return h;
+}
+
+static auto dedupeHashBytes(u64 h, const u8* data, size_t size) -> u64 {
+  size_t i = 0;
+  for(; i + 8 <= size; i += 8) {
+    u64 chunk;
+    memcpy(&chunk, data + i, sizeof(chunk));
+    h = dedupeMix(h, chunk);
+  }
+  for(; i < size; i++) h = dedupeMix(h, data[i]);
+  return h;
+}
+
+// Fingerprint the frame the VI is about to scan: the register state that
+// shapes the displayed image, plus a content hash of the scanned RDRAM
+// framebuffer. Two consecutive fields with the same fingerprint are
+// pixel-identical on screen. Field parity is folded in so the two fields
+// of an interlaced frame never dedupe against each other.
+static auto dedupeFingerprint(bool field) -> u64 {
+  // NOTE: dramAddress is deliberately NOT part of the fingerprint. It only
+  // says *where* the framebuffer lives; the displayed image is decided by
+  // the pixels (hashed below) plus how they're scaled/cropped/fielded. A
+  // double-buffered game flips dramAddress between two buffers holding
+  // identical pixels, so folding the address in would wrongly treat those
+  // as distinct frames (a static screen would only dedupe ~50%).
+  u64 h = 0xcbf29ce484222325ull;
+  h = dedupeMix(h, vi.io.width);
+  h = dedupeMix(h, vi.io.colorDepth);
+  h = dedupeMix(h, (u64)vi.io.xscale << 12 | vi.io.xsubpixel);
+  h = dedupeMix(h, (u64)vi.io.yscale << 12 | vi.io.ysubpixel);
+  h = dedupeMix(h, (u64)vi.io.hstart << 10 | vi.io.hend);
+  h = dedupeMix(h, (u64)vi.io.vstart << 10 | vi.io.vend);
+  h = dedupeMix(h, (u64)vi.io.serrate << 1 | (u64)field);
+
+  u32 bytesPerPixel = vi.io.colorDepth == 2 ? 2 : vi.io.colorDepth == 3 ? 4 : 0;
+  if(bytesPerPixel) {
+    u32 activeLines = Region::PAL() ? 576 : 480;
+    u32 sourceRows  = (((u32)vi.io.ysubpixel + (u32)vi.io.yscale * activeLines) >> 11) + 1;
+    u64 span = (u64)vi.io.width * bytesPerPixel * sourceRows;
+    u32 base = vi.io.dramAddress;
+    if(base < rdram.ram.size) {
+      u64 available = (u64)rdram.ram.size - base;
+      if(span > available) span = available;
+      h = dedupeHashBytes(h, rdram.ram.data + base, (size_t)span);
+    }
+  }
+  return h;
+}
+
+// Periodic summary so the dedupe can be observed without flooding the log
+// with one line per skipped field. Emitted via platform->status (INFO) only
+// while dedupe is enabled, roughly once every two seconds of output.
+static auto dedupeReport() -> void {
+  if(++vulkan.dedupeReportTimer < 120) return;
+  u64 total = vulkan.dedupeSkipped + vulkan.dedupePresented;
+  if(total && platform) {
+    u32 percent = (u32)(vulkan.dedupeSkipped * 100 / total);
+    string message{"ares: frame dedupe — skipped ", vulkan.dedupeSkipped,
+                   "/", total, " fields (", percent, "%)"};
+    platform->status(message);
+  }
+  vulkan.dedupeReportTimer = 0;
+  vulkan.dedupeSkipped = 0;
+  vulkan.dedupePresented = 0;
+}
 
 struct LoggingInterface : Util::LoggingInterface {
   auto log(const char* tag, const char* fmt, va_list va) -> bool {
@@ -77,6 +152,8 @@ struct Vulkan::Implementation {
 };
 
 auto Vulkan::load(Node::Object) -> bool {
+  duplicateFrame = false;
+  lastFrameKeyValid = false;
   if (vulkan.enable) {
     Util::set_thread_logging_interface(&loggingInterface);
     delete implementation;
@@ -205,6 +282,35 @@ auto Vulkan::scanoutAsync(bool field) -> bool {
   if(implementation->pendingTimeline) {
     implementation->processor->wait_for_timeline(implementation->pendingTimeline);
     implementation->pendingTimeline = 0;
+  }
+
+  // Frame dedupe: fingerprint the now-settled frame; on a repeat, skip the
+  // GPU scanout + semaphore handoff entirely and flag the frame so
+  // Program::video emits a libretro NULL dupe. Disabled when the scanout
+  // blends the previous frame (motion blur / weave), since a static source
+  // still yields a changing image there.
+  duplicateFrame = false;
+  bool blendsPreviousFrame = framePersistence || (weaveDeinterlacing && !supersampleScanout);
+  if(dedupeFrames && !blendsPreviousFrame) {
+    u64 key = dedupeFingerprint(field);
+    if(lastFrameKeyValid && key == lastFrameKey) {
+      duplicateFrame = true;
+      dedupeSkipped++;
+      dedupeReport();
+      // No scanout issued this field. Bump scanoutCount so it stays paired
+      // with the endScanout() that VI::refresh() always calls, keeping the
+      // readback wait at the top of the next scanoutAsync from deadlocking.
+      // Issuing no scanout also means no new GL→Vk wait/signal is set up, so
+      // the 1 real scanout ↔ 1 real blit semaphore pairing is preserved.
+      implementation->scanoutCount++;
+      return true;
+    }
+    lastFrameKey = key;
+    lastFrameKeyValid = true;
+    dedupePresented++;
+    dedupeReport();
+  } else {
+    lastFrameKeyValid = false;
   }
 
   implementation->processor->set_vi_register(::RDP::VIRegister::VCurrentLine, field);

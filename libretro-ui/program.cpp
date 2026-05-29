@@ -127,6 +127,16 @@ static void ensureVulkanFrameRing() {
 
 auto Program::video(ares::Node::Video::Screen node, const u32* data, u32 pitch, u32 width, u32 height) -> void {
   if(!video_cb) return;
+  // Duplicate frame (scanout dedupe): re-present the previous frame via the
+  // libretro NULL-dupe convention. set_image is deliberately skipped so the
+  // frontend's frame-generation counter doesn't advance and it re-presents
+  // the cached image; combined with the skipped GPU scanout, this keeps the
+  // HW back-pressure semaphore pairing intact. The host treats NULL as a
+  // no-op (keeps the last frame).
+  if(ares::Nintendo64::vulkan.enable && ares::Nintendo64::vulkan.duplicateFrame) {
+    video_cb(nullptr, lastVideoWidth, lastVideoHeight, lastVideoPitch);
+    return;
+  }
   // HW_RENDER (Vulkan): hand the rendered VkImage to the frontend instead
   // of copying back through a CPU buffer. Signaled to the frontend via the
   // RETRO_HW_FRAME_BUFFER_VALID sentinel passed in place of `data`.
@@ -182,11 +192,17 @@ auto Program::video(ares::Node::Video::Screen node, const u32* data, u32 pitch, 
       vulkan_iface->set_signal_semaphore(vulkan_iface->handle,
                                          ares::Nintendo64::vulkan.lastGlSignalVkSem);
     }
+    lastVideoWidth  = ares::Nintendo64::vulkan.lastImageWidth;
+    lastVideoHeight = ares::Nintendo64::vulkan.lastImageHeight;
+    lastVideoPitch  = 0;
     video_cb(RETRO_HW_FRAME_BUFFER_VALID,
              ares::Nintendo64::vulkan.lastImageWidth,
              ares::Nintendo64::vulkan.lastImageHeight, 0);
     return;
   }
+  lastVideoWidth  = width;
+  lastVideoHeight = height;
+  lastVideoPitch  = pitch;
   video_cb(data, width, height, pitch);
 }
 
@@ -340,6 +356,12 @@ auto Program::videoOptionsFromCore() -> void {
   ares::Nintendo64::option("Expansion Pak", enabled("ares_n64_expansion_pak"));
   ares::Nintendo64::option("Homebrew Mode", enabled("ares_n64_homebrew_mode"));
   ares::Nintendo64::vulkan.framePersistence = enabled("ares_n64_frame_persistence");
+
+  // Only emit NULL dupes if the frontend supports frame duping (always true
+  // on RetroArch; our own frontend handles NULL as a no-op).
+  bool canDupe = false;
+  if(environ_cb) environ_cb(RETRO_ENVIRONMENT_GET_CAN_DUPE, &canDupe);
+  ares::Nintendo64::vulkan.dedupeFrames = canDupe && enabled("ares_n64_frame_dedupe");
 
 #if defined(_WIN32)
   _putenv_s("PARALLEL_RDP_UBERSHADER", getVar("ares_n64_renderer") == "specialized" ? "0" : "1");

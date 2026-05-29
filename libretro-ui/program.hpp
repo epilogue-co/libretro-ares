@@ -53,6 +53,12 @@ struct Program : ares::Platform {
   double refreshRate = 60.0;
   u32 videoFrequency = 0;
 
+  // Dimensions of the last real frame, replayed when emitting a NULL dupe
+  // so the frontend's cached frame metadata stays consistent.
+  u32 lastVideoWidth = 0;
+  u32 lastVideoHeight = 0;
+  u32 lastVideoPitch = 0;
+
   std::unordered_map<uint32_t, uint32_t> activeCheats;
 
   auto applyCheat(const char* code) -> void;

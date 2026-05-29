@@ -133,6 +133,12 @@ auto CPU::serialize(serializer& s) -> void {
   s(cop2.latch);
 
   if constexpr(Accuracy::CPU::Recompiler) {
-    recompiler.reset();
+    // Only flush the JIT when LOADING state: restored RDRAM/icache can leave
+    // compiled blocks stale. On save (capture — including high-frequency
+    // rewind capture) the machine state is only read; the host block cache is
+    // not part of the snapshot and deferred timing is already flushed at this
+    // sync boundary, so resetting here would needlessly throw away the JIT and
+    // trigger a full recompile storm on every capture.
+    if(s.reading()) recompiler.reset();
   }
 }

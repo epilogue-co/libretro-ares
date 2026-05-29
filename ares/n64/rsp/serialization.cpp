@@ -55,7 +55,8 @@ auto RSP::serialize(serializer& s) -> void {
   s(vpu.divdp);
 
   if constexpr(Accuracy::RSP::Recompiler) {
-    recompiler.reset();
+    // See CPU::serialize: only flush the JIT on load, never on save/capture.
+    if(s.reading()) recompiler.reset();
   }
 }
 

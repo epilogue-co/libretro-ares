@@ -54,6 +54,14 @@ static const retro_core_option_v2_definition option_defs[] = {
     "enabled"
   },
   {
+    "ares_n64_frame_dedupe",
+    "Skip Duplicate Frames", nullptr,
+    "Detects when the console scans out a frame identical to the previous one (common in 20/30fps games) and re-presents it instead of re-uploading, cutting redundant GPU work. Has no effect while Motion Blur is on.",
+    nullptr, "video",
+    {{"disabled", "Off"}, {"enabled", "On"}, {nullptr, nullptr}},
+    "disabled"
+  },
+  {
     "ares_n64_renderer",
     "Renderer", nullptr,
     "Ubershader: one shader handles every RDP state — no compile stalls, modest steady-state GPU cost. Specialized: faster steady-state but pays compile cost on first encounter of each state combination (cached across sessions). Takes effect on next game load.",
