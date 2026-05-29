@@ -87,6 +87,12 @@ struct Vulkan {
   bool duplicateFrame    = false;
   bool lastFrameKeyValid = false;
   u64  lastFrameKey      = 0;
+  // Set from CommandProcessor::is_host_memory_coherent() at init. Dedupe hashes
+  // host RDRAM, which is only valid on the coherent import path; on the
+  // incoherent fallback host RDRAM is stale at fingerprint time (resolved only
+  // inside scanout(), which a deduped frame skips), so dedupe must stay off or
+  // it latches into a permanent freeze. Default false = fail safe.
+  bool hostCoherent      = false;
   // Running counts for the periodic dedupe log summary (reset each report).
   u64  dedupeSkipped     = 0;
   u64  dedupePresented   = 0;

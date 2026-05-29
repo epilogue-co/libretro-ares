@@ -144,6 +144,11 @@ public:
 	void end_write_hidden_rdram();
 	size_t get_rdram_size() const;
 	size_t get_hidden_rdram_size() const;
+	// True when host RDRAM is imported coherently (VK_EXT_external_memory_host).
+	// On the incoherent fallback the GPU renders into a private device buffer and
+	// host RDRAM is only resolved during scanout(), so a CPU hash of host RDRAM
+	// is stale — callers that fingerprint host RDRAM must check this.
+	bool is_host_memory_coherent() const { return is_host_coherent; }
 	void *get_tmem();
 
 	// Sets VI register

@@ -291,7 +291,11 @@ auto Vulkan::scanoutAsync(bool field) -> bool {
   // still yields a changing image there.
   duplicateFrame = false;
   bool blendsPreviousFrame = framePersistence || (weaveDeinterlacing && !supersampleScanout);
-  if(dedupeFrames && !blendsPreviousFrame) {
+  // hostCoherent gate: the fingerprint reads host RDRAM, which is only current on
+  // the coherent import path. On the incoherent fallback it is stale at this point
+  // (resolved only inside the later scanout(), which a dedupe skips), so deduping
+  // there would latch into a permanent freeze — keep it off.
+  if(dedupeFrames && hostCoherent && !blendsPreviousFrame) {
     u64 key = dedupeFingerprint(field);
     if(lastFrameKeyValid && key == lastFrameKey) {
       duplicateFrame = true;
@@ -520,6 +524,12 @@ Vulkan::Implementation::Implementation(u8* data, u32 size) {
   }
 
   processor->set_validation_interface(&validator);
+
+  // Frame dedupe fingerprints host RDRAM; that is only valid when RDRAM is
+  // imported coherently. On the incoherent fallback (no VK_EXT_external_memory_host)
+  // the hash reads stale bytes and dedupe would latch into a freeze, so record
+  // coherency here and gate dedupe on it in scanoutAsync.
+  vulkan.hostCoherent = processor->is_host_memory_coherent();
 }
 
 Vulkan::Implementation::~Implementation() {
